@@ -59,9 +59,27 @@ Useful flags:
 
 `minsvg plugins` lists the wired pass names. Animation-aware is **on** unless you pass `--no-animation-aware`.
 
-## Build-script example (npm + cargo)
+## Can you replace SVGO?
 
-Install the binary once in CI or on the machine, then fold it into an npm script:
+**Not as a drop-in npm package.** SVGO is `svgo` on npm: a CLI *and* `import { optimize } from 'svgo'` with a JSON plugin config, plus a Node plugin ecosystem (Vite/webpack loaders). minSVG is a **Rust crate + `minsvg` binary**.
+
+| Surface | minSVG today |
+|---|---|
+| CLI | Yes: `minsvg in.svg -o out.svg`. stdin/stdout pipes work (`cat in.svg \| minsvg --stdin`, or `minsvg -`). |
+| Rust library | Yes: call **`minsvg::optimize`** (bytes) or **`optimize_str`**. `optimize_with` is the same function. |
+| npm / wasm / napi | **No.** |
+| HTTP / hosted CDN | **No.** The `:8787` race UI is [svgo-rust](https://github.com/Gromsi/svgo-rust), a local bench, not a product API. |
+| Plugin config | `--skip NAME` and `--extra file` only. `Config.preset` is unused. Not SVGO’s `plugins: [...]`. |
+
+Embedders should call **`optimize` / `optimize_str`** and read `OptimizeOutput.svg`. The crate also `pub`s AST + named passes for the bench; that surface is awkward — do not depend on it.
+
+This is **not** a pixel-perfect SVGO clone and **not** the first Rust SVG optimizer (see Honesty). It is also **not** an XSS sanitizer: `<script>` and `on*` handlers stay (they trip animation-aware skips). For untrusted uploads, run a real sanitizer *before* or *after* minify.
+
+**Build / Vite / webpack / CI:** yes if you install the binary (`cargo install` or drop `minsvg` on PATH) and add a script. Not a drop-in `svgo` npm package today.
+
+**CDN / SaaS uploads:** run `minsvg` in *your* worker (spawn the CLI or call the Rust lib). We do **not** ship a hosted CDN or a multi-tenant HTTP API. Animation-aware is on by default (`--no-animation-aware` to run every v1 pass). The installable crate does **not** have the bench’s 3% `--no-visual-budget` flag — path minify here is the conservative lossless set.
+
+### CI / npm script
 
 ```json
 {
@@ -71,12 +89,31 @@ Install the binary once in CI or on the machine, then fold it into an npm script
 }
 ```
 
-GitHub Actions:
-
 ```yaml
+# GitHub Actions
 - uses: dtolnay/rust-toolchain@stable
 - run: cargo install --git https://github.com/Gromsi/minSVG --locked
 - run: find assets -name '*.svg' -print0 | xargs -0 -n1 -I{} minsvg {} -o {}
+```
+
+### CDN worker (sketch)
+
+```bash
+# read object bytes → optimize → write. Not a hosted CDN.
+minsvg --stdin --report -o /tmp/out.svg < "$OBJECT_BYTES"
+# or: cat "$OBJECT_BYTES" | minsvg --stdin > /tmp/out.svg
+```
+
+### SaaS upload handler (sketch)
+
+```rust
+use minsvg::{optimize, Config};
+
+fn optimize_upload(bytes: &[u8]) -> Result<Vec<u8>, minsvg::OptimizeError> {
+    let mut cfg = Config::default(); // animation_aware: true
+    // cfg.animation_aware = false; // same as --no-animation-aware
+    Ok(optimize(bytes, &cfg)?.svg.into_bytes())
+}
 ```
 
 ## Library
