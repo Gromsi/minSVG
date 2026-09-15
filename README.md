@@ -22,6 +22,8 @@ Requires a Rust toolchain (**1.83+**; a C compiler for `oxipng` / `libdeflater`)
 
 ```bash
 cargo install --git https://github.com/Gromsi/minSVG --locked
+# HTTP (`minsvg serve`) is feature-gated so the default CLI stays lean:
+cargo install --git https://github.com/Gromsi/minSVG --locked --features serve
 minsvg --help
 ```
 
@@ -35,6 +37,7 @@ From a local clone:
 
 ```bash
 cargo install --path . --locked --force
+# or: cargo install --path . --locked --force --features serve
 ```
 
 ## Usage
@@ -59,25 +62,49 @@ Useful flags:
 
 `minsvg plugins` lists the wired pass names. Animation-aware is **on** unless you pass `--no-animation-aware`.
 
-## Can you replace SVGO?
+## Migrate from SVGO
 
-**Not as a drop-in npm package.** SVGO is `svgo` on npm: a CLI *and* `import { optimize } from 'svgo'` with a JSON plugin config, plus a Node plugin ecosystem (Vite/webpack loaders). minSVG is a **Rust crate + `minsvg` binary**.
+Not a drop-in for every SVGO plugin. Animation-aware is on by default. This is **not** the first Rust SVG optimizer (see Honesty). crates.io is still optional; `cargo install --git` is the install.
 
-| Surface | minSVG today |
+We do **not** run a public optimize service. You start the binary in **your** build, VPC, or Lambda.
+
+### Build (JS / CI)
+
+1. `cargo install --git https://github.com/Gromsi/minSVG --locked` (Rust **1.83+**).
+2. Replace `svgo -f src` with a folder walk, or the SVGO-shaped JS helper in [`npm/`](npm/):
+
+```js
+import { optimize } from 'minsvg'
+const { data } = optimize(svgString) // same idea as svgo
+```
+
+```bash
+npm install ./npm          # from a clone; or npm install minsvg if published
+# the package spawns `minsvg` from PATH or MINSVG_BIN
+find src -name '*.svg' -print0 | xargs -0 -n1 -I{} minsvg {} -o {}
+```
+
+`package.json` also ships a `minsvg` bin shim that finds the Rust binary (it will not recurse into itself).
+
+### Service (you start it)
+
+```bash
+cargo install --git https://github.com/Gromsi/minSVG --locked --features serve
+minsvg serve --bind 127.0.0.1:8765
+# POST /optimize  JSON { "svg": "<svg...>" } → { "data": "<svg...>" }
+# POST /optimize  raw image/svg+xml         → SVG body
+# GET  /health    → { "ok": true }
+```
+
+Default bind is **localhost**. Use `0.0.0.0:8080` only when you opt into LAN / a container. No auth (your VPC / Lambda). Put **your** nginx or API Gateway in front.
+
+**Local vs Lambda / container**
+
+| Where | What you run |
 |---|---|
-| CLI | Yes: `minsvg in.svg -o out.svg`. stdin/stdout pipes work (`cat in.svg \| minsvg --stdin`, or `minsvg -`). |
-| Rust library | Yes: call **`minsvg::optimize`** (bytes) or **`optimize_str`**. `optimize_with` is the same function. |
-| npm / wasm / napi | **No.** |
-| HTTP / hosted CDN | **No.** The `:8787` race UI is [svgo-rust](https://github.com/Gromsi/svgo-rust), a local bench, not a product API. |
-| Plugin config | `--skip NAME` and `--extra file` only. `Config.preset` is unused. Not SVGO’s `plugins: [...]`. |
-
-Embedders should call **`optimize` / `optimize_str`** and read `OptimizeOutput.svg`. The crate also `pub`s AST + named passes for the bench; that surface is awkward — do not depend on it.
-
-This is **not** a pixel-perfect SVGO clone and **not** the first Rust SVG optimizer (see Honesty). It is also **not** an XSS sanitizer: `<script>` and `on*` handlers stay (they trip animation-aware skips). For untrusted uploads, run a real sanitizer *before* or *after* minify.
-
-**Build / Vite / webpack / CI:** yes if you install the binary (`cargo install` or drop `minsvg` on PATH) and add a script. Not a drop-in `svgo` npm package today.
-
-**CDN / SaaS uploads:** run `minsvg` in *your* worker (spawn the CLI or call the Rust lib). We do **not** ship a hosted CDN or a multi-tenant HTTP API. Animation-aware is on by default (`--no-animation-aware` to run every v1 pass). The installable crate does **not** have the bench’s 3% `--no-visual-budget` flag — path minify here is the conservative lossless set.
+| Laptop | `minsvg serve --bind 127.0.0.1:8765` |
+| ECS / Cloud Run | The [`Dockerfile`](Dockerfile): `CMD ["minsvg", "serve", "--bind", "0.0.0.0:8080"]` — **you** deploy it |
+| Lambda | Container image above, or [`examples/lambda/index.mjs`](examples/lambda/index.mjs) (`spawnSync('minsvg', ['--stdin'])`) attached to **your** API Gateway |
 
 ### CI / npm script
 
@@ -95,6 +122,24 @@ This is **not** a pixel-perfect SVGO clone and **not** the first Rust SVG optimi
 - run: cargo install --git https://github.com/Gromsi/minSVG --locked
 - run: find assets -name '*.svg' -print0 | xargs -0 -n1 -I{} minsvg {} -o {}
 ```
+
+## Can you replace SVGO?
+
+**Not as a plugin-config drop-in.** SVGO is `svgo` on npm with `plugins: [...]` and a Node loader ecosystem. minSVG is a **Rust crate + `minsvg` binary**, plus a tiny JS wrapper that spawns that binary.
+
+| Surface | minSVG today |
+|---|---|
+| CLI | Yes: `minsvg in.svg -o out.svg`. stdin/stdout pipes work (`cat in.svg \| minsvg --stdin`, or `minsvg -`). |
+| Rust library | Yes: call **`minsvg::optimize`** (bytes) or **`optimize_str`**. `optimize_with` is the same function. |
+| npm `optimize()` | Yes: [`npm/`](npm/) spawns the Rust binary (`PATH` or `MINSVG_BIN`). Not wasm / napi. |
+| HTTP | Yes: **`minsvg serve`** (`--features serve`). You start it. Not a hosted CDN. The `:8787` race UI is [svgo-rust](https://github.com/Gromsi/svgo-rust), a local bench. |
+| Plugin config | `--skip NAME` and `--extra file` only. `Config.preset` is unused. Not SVGO’s `plugins: [...]`. |
+
+Embedders should call **`optimize` / `optimize_str`** and read `OptimizeOutput.svg`. The crate also `pub`s AST + named passes for the bench; that surface is awkward — do not depend on it.
+
+This is **not** a pixel-perfect SVGO clone and **not** the first Rust SVG optimizer (see Honesty). It is also **not** an XSS sanitizer: `<script>` and `on*` handlers stay (they trip animation-aware skips). For untrusted uploads, run a real sanitizer *before* or *after* minify.
+
+Animation-aware is on by default (`--no-animation-aware` to run every v1 pass). The installable crate does **not** have the bench’s 3% `--no-visual-budget` flag — path minify here is the conservative lossless set.
 
 ### CDN worker (sketch)
 
@@ -133,7 +178,10 @@ let out = minsvg::optimize(svg_bytes, &cfg)?;
 
 ```bash
 cargo test
+cargo test --features serve
 cargo build --release
+cargo build --release --features serve
+cd npm && npm test
 ./target/release/minsvg --help
 ```
 

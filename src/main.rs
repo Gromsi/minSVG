@@ -5,6 +5,9 @@ use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+#[cfg(feature = "serve")]
+mod serve;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "minsvg",
@@ -60,12 +63,19 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Self-hosted optimize HTTP (you bind it; default is localhost)
+    Serve {
+        /// Bind address (`0.0.0.0:8080` in a container you deploy)
+        #[arg(long, default_value = "127.0.0.1:8765")]
+        bind: String,
+    },
 }
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::Plugins { json }) => print_plugins(json),
+        Some(Commands::Serve { bind }) => return run_serve(&bind),
         None => {
             if let Err(err) = run_from_args(cli.optimize) {
                 eprintln!("minsvg: {err}");
@@ -74,6 +84,26 @@ fn main() -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+fn run_serve(bind: &str) -> ExitCode {
+    #[cfg(feature = "serve")]
+    {
+        if let Err(err) = serve::run(bind) {
+            eprintln!("minsvg: {err}");
+            return ExitCode::FAILURE;
+        }
+        ExitCode::SUCCESS
+    }
+    #[cfg(not(feature = "serve"))]
+    {
+        let _ = bind;
+        eprintln!(
+            "minsvg: this binary was built without HTTP serve.\n\
+             cargo install --git https://github.com/Gromsi/minSVG --locked --features serve"
+        );
+        ExitCode::FAILURE
+    }
 }
 
 fn run_from_args(args: OptimizeArgs) -> Result<(), String> {
@@ -291,6 +321,20 @@ mod tests {
         }
         for name in MOTION_SKIP_PLUGINS {
             assert!(payload.contains(&format!("\"{name}\"")), "{payload}");
+        }
+    }
+
+    #[test]
+    fn serve_defaults_to_localhost() {
+        let cli = Cli::try_parse_from(["minsvg", "serve"]).unwrap();
+        match cli.command {
+            Some(Commands::Serve { bind }) => assert_eq!(bind, "127.0.0.1:8765"),
+            other => panic!("expected Serve, got {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["minsvg", "serve", "--bind", "0.0.0.0:8080"]).unwrap();
+        match cli.command {
+            Some(Commands::Serve { bind }) => assert_eq!(bind, "0.0.0.0:8080"),
+            other => panic!("expected Serve, got {other:?}"),
         }
     }
 
