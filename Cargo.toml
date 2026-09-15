@@ -1,0 +1,31 @@
+[package]
+name = "minsvg"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Clean-room Rust SVG optimizer (animation-aware by default)"
+repository = "https://github.com/Gromsi/minSVG"
+homepage = "https://github.com/Gromsi/minSVG"
+readme = "README.md"
+keywords = ["svg", "optimizer", "cli"]
+categories = ["command-line-utilities", "compression"]
+rust-version = "1.83"
+include = ["src/**/*", "tests/**/*", "Cargo.toml", "Cargo.lock", "LICENSE", "README.md"]
+
+[lib]
+name = "minsvg"
+path = "src/lib.rs"
+
+[[bin]]
+name = "minsvg"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "=4.5.32", features = ["derive"] }
+thiserror = "2"
+quick-xml = "0.37"
+base64 = "0.22"
+image = { version = "=0.25.5", default-features = false, features = ["png", "jpeg", "webp"] }
+oxipng = { version = "=9.1.5", default-features = false, features = ["parallel"] }
+# Cargo 1.83 cannot parse edition-2024 manifests (indexmap 2.12+).
+indexmap = { version = "=2.11.4", default-features = false }

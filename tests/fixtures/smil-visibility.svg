@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+  <g visibility="hidden">
+    <rect id="frameA" width="10" height="10" fill="#c00">
+      <animate attributeName="visibility" values="hidden;visible;hidden" keyTimes="0;0.5;1" dur="1s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+  <g visibility="visible">
+    <rect id="frameB" width="10" height="10" fill="#0a0">
+      <animate attributeName="visibility" values="visible;hidden" keyTimes="0;1" dur="1s" repeatCount="indefinite"/>
+    </rect>
+  </g>
+</svg>
