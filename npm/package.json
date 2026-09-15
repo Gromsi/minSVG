@@ -1,7 +1,7 @@
 {
   "name": "minsvg",
   "version": "0.1.0",
-  "description": "SVGO-shaped optimize() that spawns the Rust minsvg binary (not bundled — cargo install separately). SVG minify; not wasm/napi.",
+  "description": "SVGO-shaped optimize() that spawns the Rust minsvg binary (not bundled — cargo install separately). ~4 KB tarball; ~2 MB CLI. Not wasm/napi.",
   "type": "module",
   "exports": {
     ".": {

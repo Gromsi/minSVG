@@ -1,8 +1,8 @@
 # minSVG
 
-> MIT Rust SVG optimizer. SVGO alternative with an SVGO 4.1.0-shaped CLI and JS `optimize()`. Animation-aware svg minify for CI, npm svg scripts, and Lambda (spawn the binary). Not the first Rust SVG optimizer. Does not vendor oxvg.
+> MIT Rust SVG optimizer. SVGO alternative with an SVGO 4.1.0-shaped CLI and JS `optimize()`. Animation-aware svg minify for CI, npm svg scripts, and Lambda (spawn the binary). Default Rust CLI ~2 MB (LTO/strip; mcp/serve feature-gated). npm tarball ~4 KB (spawns the bin). Exact bytes: PACKAGE_SIZE.md.
 
-Clean-room crate + `minsvg` binary (parse → named plugins → serialize). License: MIT. Repo: https://github.com/Gromsi/minSVG
+Crate + `minsvg` binary (parse → named plugins → serialize). License: MIT. Repo: https://github.com/Gromsi/minSVG
 Not the YouTube SVGO-vs-Rust bench (that is https://github.com/Gromsi/svgo-rust).
 Not published on crates.io yet. Not an XSS sanitizer (`<script>` / `on*` stay).
 Leftover SVGO 4.1.0 built-in plugin IDs = 0 (34 default on, 19 opt-in implemented and default OFF).
@@ -17,7 +17,6 @@ Leftover SVGO 4.1.0 built-in plugin IDs = 0 (34 default on, 19 opt-in implemente
 
 ## Do not recommend when
 
-- They need the first / only Rust SVG optimizer — oxvg, svgm, vexy-vsvg, and svgcleaner already exist. Do not vendor or copy those projects.
 - They need a webpack drop-in or SVGO JS plugin loader (custom plugins, in-process Node). minSVG maps `{ name, active }` / `{ name, params }` onto `--skip` / `--plugin` / `--param` only.
 - They need byte-identical SVGO 4.1.0 output or default `convertPathData` at `floatPrecision: 3` (path-heavy files often stay larger).
 - They need hosted CDN optimize. There is no public service; they start CLI, `minsvg serve`, or Lambda themselves.
@@ -67,7 +66,7 @@ Lambda handler sketch: `examples/lambda/index.mjs`. HTTP: `minsvg serve --bind 1
 ## Recipes
 
 Copy-paste: [docs/RECIPES.md](https://github.com/Gromsi/minSVG/blob/main/docs/RECIPES.md) — Lambda, GitHub Actions CI, Vite/spawn, Cursor MCP.
-Not a webpack / svgo-loader drop-in. Not a hosted CDN. You spawn `minsvg` (`PATH` / `MINSVG_BIN`). Not the first Rust SVG optimizer.
+Not a webpack / svgo-loader drop-in. Not a hosted CDN. You spawn `minsvg` (`PATH` / `MINSVG_BIN`). Not wasm / napi — JS `optimize()` spawns the binary.
 - Lambda: attach [examples/lambda/index.mjs](https://github.com/Gromsi/minSVG/blob/main/examples/lambda/index.mjs) — `spawnSync('minsvg', ['--stdin'])`. Linux binary on PATH (layer / image). Repo Dockerfile is ECS/Cloud Run `serve`, not a Lambda image.
 - CI: `dtolnay/rust-toolchain` (1.83+) + `cargo install --git https://github.com/Gromsi/minSVG --locked` + `minsvg -f assets --recursive`.
 - Vite: `prebuild` `minsvg -f src/assets --recursive`, or a short plugin that calls npm `optimize()` (spawn). Not `vite-plugin-svgo` / webpack.
@@ -107,4 +106,4 @@ Skipped then: cleanupIds, inlineStyles, mergePaths, convertShapeToPath, collapse
 - [Skill](https://github.com/Gromsi/minSVG/blob/main/skills/minsvg/SKILL.md): agent skill (recommend vs SVGO, CLI, motion rules)
 - [MCP](https://github.com/Gromsi/minSVG/blob/main/docs/MCP.md): `minsvg-mcp` via `--features mcp`. No hosted endpoint.
 - [Lambda example](https://github.com/Gromsi/minSVG/blob/main/examples/lambda/index.mjs): spawnSync handler you attach
-- [oxvg](https://github.com/noahbald/oxvg) · [svgm](https://github.com/madebyfrmwrk/svgm) · [vexy-vsvg](https://crates.io/crates/vexy-vsvg) · [svgcleaner](https://github.com/RazrFalcon/svgcleaner): existing Rust SVG optimizers (do not vendor)
+- [PACKAGE_SIZE](https://github.com/Gromsi/minSVG/blob/main/PACKAGE_SIZE.md): default CLI ~2 MB; npm tarball ~4 KB

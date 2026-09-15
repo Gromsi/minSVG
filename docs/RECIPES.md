@@ -2,7 +2,7 @@
 
 Copy-paste for **svg minify** with a **Rust SVG optimizer** / **SVGO alternative**: **Lambda** (`spawn`), **CI** (**GitHub Action**), **Vite/spawn**, and **Cursor MCP**.
 
-This is **not** the first Rust SVG optimizer ([oxvg](https://github.com/noahbald/oxvg), [svgm](https://github.com/madebyfrmwrk/svgm), [vexy-vsvg](https://crates.io/crates/vexy-vsvg), [svgcleaner](https://github.com/RazrFalcon/svgcleaner)). It is **not** a webpack / `svgo-loader` / `vite-plugin-svgo` drop-in. There is **no** hosted CDN — you start `minsvg` (or `minsvg-mcp`) yourself.
+It is **not** a webpack / `svgo-loader` / `vite-plugin-svgo` drop-in. There is **no** hosted CDN — you start `minsvg` (or `minsvg-mcp`) yourself.
 
 The npm helper `optimize()` **spawns** the Rust binary (`PATH` or `MINSVG_BIN`). It is not wasm / napi / in-process SVGO.
 

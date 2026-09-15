@@ -15,13 +15,15 @@ wc -c target/size-after/release/minsvg
 
 `panic=abort` is kept: this crate is a CLI and does not `catch_unwind`. Library dependents still use *their* profile.
 
-Earlier 2026-09-15 note (`rustc 1.98.1`, slimmer tree): 2,415,144 → 1,446,432 (−40%). The 1.83.0 pair above is the current default `minsvg`.
+Later dead-dep cuts (unused direct `indexmap`, oxipng `parallel` / rayon) brought the same default release CLI to **1,991,736** bytes (~1.99 MB). That is the current headline number.
+
+Earlier 2026-09-15 note (`rustc 1.98.1`, slimmer tree): 2,415,144 → 1,446,432 (−40%).
 
 ## Release binary budget
 
 The default `minsvg` CLI (no `--features serve` / `mcp`) must stay at or under **2.5 MiB** (`2_621_440` bytes) after `cargo build --release --bin minsvg`.
 
-That is the current measured size (2,058,888 on rustc 1.83 **and** 1.98.1, Mach-O arm64) plus slack for Linux / rustc variance. The 1.5–2.0 MB band is the product target (an older slimmer tree hit 1.45 MB). The gate is **measured size + slack** so a 1.83 Linux binary does not flake, while a `[profile.release]` revert (3.3M+ stock 1.83) still fails.
+That is the current measured size (1,991,736 after dead-deps; LTO/strip after was 2,058,888) plus slack for Linux / rustc variance. The 1.5–2.0 MB band is the product target (an older slimmer tree hit 1.45 MB). The gate is **measured size + slack** so a 1.83 Linux binary does not flake, while a `[profile.release]` revert (3.3M+ stock 1.83) still fails.
 
 **Debug `cargo test` does not enforce this** (unstripped debug `minsvg` is ~14 MB). CI is debug-only and must stay green.
 
@@ -128,7 +130,7 @@ Re-checked on this host (`rustc 1.98.1`, existing `target/release/minsvg`; `npm 
 
 | artifact | size | notes |
 |---|---|---|
-| default release CLI (`minsvg`, no extra features) | **~2.0 MB** (2,058,888 bytes) | `cargo build --release --bin minsvg` |
+| default release CLI (`minsvg`, no extra features) | **~2 MB** (1,991,736 bytes; was 2,058,888 before dead-deps) | `cargo build --release --bin minsvg` |
 | npm tarball packed | **~4 KB** (3,959) | `minsvg-0.1.0.tgz` |
 | npm tarball unpacked | **~11 KB** (11,123) | 5 files: `package.json`, `index.js`, `index.d.ts`, `bin/minsvg.js`, `README.md` |
 
@@ -148,6 +150,8 @@ cargo +1.83.0 build --release --bin minsvg
 | default (no features) | `minsvg` | 2,058,888 |
 | `--features serve` | `minsvg` | 2,242,040 (+183,152) |
 | `--features mcp` | `minsvg-mcp` (separate bin) | 1,875,432 |
+
+Default CLI later dropped to **1,991,736** after dead-deps (see [Snapshot](#snapshot-2026-09-16)). Serve/mcp rows above are the T38 pair.
 
 Default compile graph has **no `axum`, `tiny_http`, `tokio`, or `mcp_stdio`**. `minsvg-mcp` is not produced. `minsvg serve` on the default bin exits 1 (`without HTTP serve` + `--features serve` hint).
 

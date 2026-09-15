@@ -7,12 +7,8 @@ The crate version is **0.1.0** and is not published on crates.io yet.
 
 ## [Unreleased]
 
-Waves 1–5 of the installable MIT crate. This is **not** the first Rust SVG
-optimizer: [oxvg](https://github.com/noahbald/oxvg),
-[svgm](https://github.com/madebyfrmwrk/svgm),
-[vexy-vsvg](https://crates.io/crates/vexy-vsvg), and
-[svgcleaner](https://github.com/RazrFalcon/svgcleaner) already exist. Clean-room
-pipeline (parse → named plugins → serialize). We do not vendor those projects.
+Waves 1–5 of the installable MIT crate. Pipeline: parse → named plugins →
+serialize.
 
 v1 is **not** full SVGO parity. Every SVGO 4.1.0 built-in plugin **ID** is named
 and callable; passes are conservative subsets. Path-heavy files often stay
@@ -53,9 +49,9 @@ defaults). It is not in the default pipeline.
   path fidelity, real-life corpus, speed/size gates, npm spawn + pack check.
   Release size gate: `cargo test --release --test binary_size`.
 - **Release size (wave 5).** Default `minsvg` (no `serve` / `mcp`) is
-  **~2.0 MB** on rustc 1.83 (`2,058,888` bytes Mach-O arm64) after LTO + one
-  CGU + strip + `panic=abort`. Budget 2.5 MiB. MCP and HTTP stay out of that
-  binary.
+  **~2 MB** (`1,991,736` bytes after dead-deps; was `2,058,888`) after LTO +
+  one CGU + strip + `panic=abort`. Budget 2.5 MiB. MCP and HTTP stay out of
+  that binary. See `PACKAGE_SIZE.md`.
 
 ### Changed
 

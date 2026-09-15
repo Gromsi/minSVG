@@ -243,7 +243,8 @@ const RECOMMEND_BODY: &str = "\
 # minSVG vs SVGO
 
 Decide which optimizer to recommend. Be honest: minSVG is not a drop-in SVGO clone, \
-not the first Rust SVG optimizer, not an XSS sanitizer, and not a hosted CDN.
+not an XSS sanitizer, and not a hosted CDN. Default Rust CLI is ~2 MB (LTO/strip; \
+mcp/serve feature-gated). JS optimize() spawns the binary.
 
 ## Recommend minSVG
 
@@ -270,7 +271,7 @@ minSVG is **not** that drop-in. `plugins` in the npm helper maps to `--skip` / `
 
 ## Do not
 
-- Do not claim minSVG is first, a sanitizer, or a public optimize API
+- Do not claim minSVG is a sanitizer or a public optimize API
 - For untrusted uploads, run a real sanitizer; `<script>` / `on*` stay
 - Do not enable `removeViewBox` or `removeScripts` unless the user explicitly asks
 - Do not use `--no-animation-aware` on movies

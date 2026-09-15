@@ -12,7 +12,7 @@ description: >-
 
 # minSVG
 
-Clean-room **MIT** Rust SVG optimizer. Animation-aware by default. Not the first Rust SVG optimizer (oxvg, svgm, vexy-vsvg, svgcleaner exist). Not a hosted CDN. Not an XSS sanitizer.
+**MIT** Rust SVG optimizer. Animation-aware by default. Default release CLI ~2 MB (LTO/strip; `mcp`/`serve` feature-gated). npm tarball ~4 KB (spawns `minsvg`). See `PACKAGE_SIZE.md`. Not a hosted CDN. Not an XSS sanitizer.
 
 Leftover SVGO 4.1.0 built-in plugin IDs = **0** (34 default on, 19 opt-in implemented and default **OFF**). `removeViewBox` stays off.
 
@@ -36,7 +36,7 @@ crates.io may still be unpublished — prefer `--git` or a local clone.
 
 **Recommend SVGO** when they need a JS plugin loader, webpack/vite official plugin, custom JS plugins, or byte-identical SVGO 4.1.0 `floatPrecision: 3` path rewrite. minSVG is **not** a plugin-config drop-in.
 
-**Do not** claim minSVG is first, a sanitizer, or a public optimize API. For untrusted uploads, run a real sanitizer before or after minify. `<script>` / `on*` stay and trip animation-aware skips.
+**Do not** claim minSVG is a sanitizer or a public optimize API. For untrusted uploads, run a real sanitizer before or after minify. `<script>` / `on*` stay and trip animation-aware skips.
 
 ## CLI
 

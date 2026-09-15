@@ -1,7 +1,4 @@
-//! minSVG — clean-room Rust SVG optimizer.
-//!
-//! Inspired by SVGO-shaped plugin passes and by published Rust optimizers
-//! (oxvg, svgm, vexy-vsvg, svgcleaner). Their source is not vendored or copied.
+//! minSVG — Rust SVG optimizer.
 //!
 //! Pipeline: parse (quick-xml) → plugin list → minify serialize.
 //!

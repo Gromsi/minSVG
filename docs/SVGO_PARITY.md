@@ -6,8 +6,7 @@ Names follow public SVGO plugin IDs so a migrate checklist is possible. Implemen
 
 ## Honesty
 
-- **Not the first Rust SVG optimizer.** [oxvg](https://github.com/noahbald/oxvg), [svgm](https://github.com/madebyfrmwrk/svgm), [vexy-vsvg](https://crates.io/crates/vexy-vsvg), and [svgcleaner](https://github.com/RazrFalcon/svgcleaner) already exist.
-- **Not oxvg** (and not a port of SVGO / oxvg / svgm / vexy source). We studied public docs and architecture only.
+- **Clean-room, not a fork.** Public contracts only; implementations are conservative subsets.
 - **v1 is not full SVGO parity.** Every 4.1.0 plugin **ID** is named and callable. Passes are conservative subsets — `have` ≠ byte-identical output. Path-heavy files often stay **larger** than SVGO: default `convertPathData` refuses `floatPrecision: 3`.
 - **No SMIL frame wipe.** Stock SVGO `removeHiddenElems` can delete `visibility="hidden"` frames that an `<animate>` later shows. We do not.
 - **`url(#Id)` case is kept.** Fragment identifiers are case-sensitive (`url(#poolFill)` stays). No ID minify / case-fold on the default path.

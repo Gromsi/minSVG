@@ -21,10 +21,10 @@
 use std::fs;
 use std::path::Path;
 
-/// 2.5 MiB. Current default release `minsvg` measured 2_058_888
-/// (`PACKAGE_SIZE.md`; rustc 1.83 and 1.98.1, Mach-O arm64). Ceiling is
-/// that number plus slack for Linux / rustc variance. Still fails a
-/// `[profile.release]` revert (stock 1.83 release was 3_460_616).
+/// 2.5 MiB. Current default release `minsvg` measured 1_991_736
+/// (`PACKAGE_SIZE.md`; after dead-deps). Ceiling is that number plus slack
+/// for Linux / rustc variance. Still fails a `[profile.release]` revert
+/// (stock 1.83 release was 3_460_616).
 const MAX_RELEASE_BYTES: u64 = 2 * 1024 * 1024 + 512 * 1024;
 
 #[test]
@@ -59,7 +59,7 @@ fn default_release_minsvg_stays_under_budget() {
     assert!(
         bytes > 0 && bytes <= MAX_RELEASE_BYTES,
         "{} is {bytes} bytes; default release minsvg budget is {MAX_RELEASE_BYTES} \
-         (2.5 MiB = rustc 1.83 measured 2058888 + slack). \
+         (2.5 MiB = rustc 1.83 measured 1991736 + slack). \
          Measure: cargo build --release --bin minsvg && wc -c target/release/minsvg",
         path.display()
     );

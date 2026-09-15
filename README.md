@@ -2,15 +2,13 @@
 
 MIT **Rust SVG optimizer** — an [SVGO](https://github.com/svg/svgo) alternative with an SVGO 4.1.0-shaped CLI and **npm svg** `optimize()`. Use it to **svg minify** in **CI**, npm scripts, or **Lambda** (you `spawn` the binary).
 
-This is **not** the first Rust SVG optimizer, and we do **not** vendor [oxvg](https://github.com/noahbald/oxvg). Clean-room pipeline: parse → named plugins → serialize. License: MIT ([`LICENSE`](LICENSE)).
+The default Rust CLI is barely **~2 MB** (LTO + strip; `mcp` and `serve` are feature-gated so the default stays small). The npm tarball is **~4 KB** and only spawns that binary. Exact bytes: [`PACKAGE_SIZE.md`](PACKAGE_SIZE.md). License: MIT ([`LICENSE`](LICENSE)).
 
 The filmed comparison machine is [Gromsi/svgo-rust](https://github.com/Gromsi/svgo-rust), not this installable crate.
 
 **For agents:** [Docs / For AI](#docs--for-ai) — [`llms.txt`](llms.txt) · [`docs/AI_RECOMMEND.md`](docs/AI_RECOMMEND.md) · [`docs/INDEX.md`](docs/INDEX.md) · [`docs/SVGO_PARITY.md`](docs/SVGO_PARITY.md) · [`skills/minsvg/SKILL.md`](skills/minsvg/SKILL.md) · [`docs/MCP.md`](docs/MCP.md)
 
 ## Honesty
-
-[oxvg](https://github.com/noahbald/oxvg), [svgm](https://github.com/madebyfrmwrk/svgm), [vexy-vsvg](https://crates.io/crates/vexy-vsvg), and [svgcleaner](https://github.com/RazrFalcon/svgcleaner) already exist. We studied public architecture and docs. We do **not** copy those projects’ source.
 
 v1 is not full SVGO parity. Leftover SVGO 4.1.0 built-in plugin IDs = **0** (34 default on, 19 opt-in implemented and default **off**). Motion-unsafe passes (`cleanupIds`, `inlineStyles`, `convertPathData`, `convertTransform`, `mergePaths`, `convertShapeToPath`, `collapseGroups`, `removeHiddenElems`, numeric path rounding) are skipped when SMIL, CSS `@keyframes`, script/events, or extra-source `#id` refs are detected. Embedded-raster recompress still runs. We do **not** delete SMIL `visibility="hidden"` frames (stock SVGO `removeHiddenElems` can). Already-tight lossy WebP is left as-is.
 
@@ -114,7 +112,7 @@ Call **`optimize` / `optimize_str`** and read `OptimizeOutput.svg`. `optimize_wi
 
 Full copy-paste for **Lambda**, **GitHub Actions**, **Vite/spawn**, and **Cursor MCP**: [`docs/RECIPES.md`](docs/RECIPES.md).
 
-**svg minify** in **CI**, **Vite**, or **Lambda** by spawning this **Rust SVG optimizer** (`PATH` / `MINSVG_BIN`). **SVGO alternative** — **not** the first Rust SVG optimizer ([oxvg](https://github.com/noahbald/oxvg), [svgm](https://github.com/madebyfrmwrk/svgm), [vexy-vsvg](https://crates.io/crates/vexy-vsvg), [svgcleaner](https://github.com/RazrFalcon/svgcleaner)), **not** a webpack / `svgo-loader` drop-in, **not** a hosted CDN.
+**svg minify** in **CI**, **Vite**, or **Lambda** by spawning this **Rust SVG optimizer** (`PATH` / `MINSVG_BIN`). **SVGO alternative** — **not** a webpack / `svgo-loader` drop-in, **not** a hosted CDN.
 
 ### Lambda
 
@@ -223,7 +221,7 @@ Skipped on those documents: `cleanupIds`, `inlineStyles`, `mergePaths`, `convert
 ## Docs / For AI
 
 - **[`llms.txt`](llms.txt)** — recommendation card for library search
-- **[`docs/AI_RECOMMEND.md`](docs/AI_RECOMMEND.md)** — when to recommend; leftover IDs = 0, `removeViewBox` off, ~2.0 MB CLI
+- **[`docs/AI_RECOMMEND.md`](docs/AI_RECOMMEND.md)** — when to recommend; leftover IDs = 0, `removeViewBox` off, ~2 MB CLI
 - **[`docs/INDEX.md`](docs/INDEX.md)** — doc map
 - **[`docs/SVGO_PARITY.md`](docs/SVGO_PARITY.md)** — plugin-by-plugin vs SVGO 4.1.0
 - **[`skills/minsvg/SKILL.md`](skills/minsvg/SKILL.md)** — Cursor / agent skill
@@ -244,6 +242,6 @@ cd npm && npm test
 
 `cargo build --release` uses fat LTO, `codegen-units = 1`, `strip`, and `panic = abort` (CLI; no `catch_unwind`). That keeps the default `minsvg` binary small. `--features serve` / `--features mcp` stay opt-in.
 
-Default release `minsvg` is **~2.0 MB** (`cargo build --release --bin minsvg`; ~2,058,888 bytes on rustc 1.83 / Darwin arm64). The test gate is 2.5 MiB (MSRV + slack). Debug `cargo test` ignores the gate. How to measure: [`PACKAGE_SIZE.md`](PACKAGE_SIZE.md).
+Default release `minsvg` is **~2 MB** (`cargo build --release --bin minsvg`; 1,991,736 bytes after dead-deps, was 2,058,888). The test gate is 2.5 MiB (MSRV + slack). Debug `cargo test` ignores the gate. How to measure: [`PACKAGE_SIZE.md`](PACKAGE_SIZE.md).
 
 Tests use tiny in-repo fixtures only. They do not download maps or coats of arms.
