@@ -9,9 +9,17 @@ use std::process::ExitCode;
 #[command(
     name = "minsvg",
     version,
-    about = "minSVG — clean-room Rust SVG optimizer",
+    about = "Clean-room Rust SVG optimizer",
     args_conflicts_with_subcommands = true,
-    arg_required_else_help = true
+    arg_required_else_help = true,
+    disable_help_subcommand = true,
+    help_template = "\
+{about} {version}
+
+{usage-heading} {usage}
+
+{all-args}
+"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -22,35 +30,33 @@ struct Cli {
 
 #[derive(Args, Debug, Default)]
 struct OptimizeArgs {
-    /// Input file. Use `-` for stdin. Omit when piping or using --stdin.
+    /// SVG file, or `-` for stdin
     input: Option<PathBuf>,
-    /// Output file. Use `-` or omit to write stdout.
+    /// Write file (`-` = stdout)
     #[arg(short, long)]
     output: Option<PathBuf>,
-    /// Read the SVG from stdin.
+    /// Read stdin
     #[arg(long, conflicts_with = "input")]
     stdin: bool,
-    /// Print `optimized x.svg −NKB · preserved N ids · skipped …` to stderr.
+    /// Summary on stderr
     #[arg(long)]
     report: bool,
-    /// Run every MVP pass even on SMIL/CSS/script documents (not the default).
+    /// Do not skip motion-unsafe passes
     #[arg(long)]
     no_animation_aware: bool,
-    /// Sibling JS/TS/CSS/JSX files whose `#id` / getElementById refs must survive.
+    /// Extra JS/TS/CSS/JSX for `#id` refs
     #[arg(long)]
     extra: Vec<PathBuf>,
-    /// Skip named MVP passes (repeatable).
+    /// Skip a named pass
     #[arg(long)]
     skip: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Optimize an SVG (stdin or file) and write the result.
-    Optimize(OptimizeArgs),
-    /// List MVP plugin names (wired default set; convertPathData is a conservative minify).
+    /// List wired pass names
     Plugins {
-        /// Machine-readable `{ wired, motion_skip, path_data }` JSON.
+        /// JSON
         #[arg(long)]
         json: bool,
     },
@@ -60,12 +66,6 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Some(Commands::Plugins { json }) => print_plugins(json),
-        Some(Commands::Optimize(args)) => {
-            if let Err(err) = run_from_args(args) {
-                eprintln!("minsvg: {err}");
-                return ExitCode::FAILURE;
-            }
-        }
         None => {
             if let Err(err) = run_from_args(cli.optimize) {
                 eprintln!("minsvg: {err}");
@@ -300,15 +300,21 @@ mod tests {
         assert!(cli.command.is_none(), "{cli:?}");
         assert_eq!(cli.optimize.input.as_deref(), Some(Path::new("in.svg")));
         assert_eq!(cli.optimize.output.as_deref(), Some(Path::new("out.svg")));
+    }
 
-        let cli = Cli::try_parse_from(["minsvg", "optimize", "in.svg", "-o", "out.svg"]).unwrap();
-        match cli.command {
-            Some(Commands::Optimize(args)) => {
-                assert_eq!(args.input.as_deref(), Some(Path::new("in.svg")));
-                assert_eq!(args.output.as_deref(), Some(Path::new("out.svg")));
-            }
-            other => panic!("expected Optimize, got {other:?}"),
-        }
+    #[test]
+    fn optimize_is_not_a_subcommand() {
+        let err = Cli::try_parse_from(["minsvg", "optimize", "--help"])
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            !err.contains("Usage: minsvg optimize"),
+            "optimize subcommand should be gone: {err}"
+        );
+        let cli = Cli::try_parse_from(["minsvg", "optimize", "-o", "out.svg"]).unwrap();
+        assert!(cli.command.is_none(), "{cli:?}");
+        assert_eq!(cli.optimize.input.as_deref(), Some(Path::new("optimize")));
     }
 
     #[test]

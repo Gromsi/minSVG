@@ -21,14 +21,13 @@ pub use animation::{
     SmilSyncRef, MOTION_SKIP_PLUGINS,
 };
 pub use ast::{Document, Element, Node};
-pub use plugin_minify::{run_minify, MINIFY_PLUGIN_NAMES};
+pub use plugin_minify::run_minify;
 pub use plugin_paths::{
-    convert_path_data, convert_shape_to_path, merge_paths, minify_path_d, run_path_stub,
-    PATH_PLUGIN_NAMES,
+    convert_path_data, convert_shape_to_path, merge_paths, minify_path_d, PATH_PLUGIN_NAMES,
 };
-pub use plugin_raster::{recompress_embedded_rasters, RASTER_PLUGIN_NAMES};
+pub use plugin_raster::recompress_embedded_rasters;
 pub use plugin_strip::{run_strip, STRIP_PLUGIN_NAMES};
-pub use plugins::{run_default, DEFAULT_PLUGIN_NAMES};
+pub use plugins::DEFAULT_PLUGIN_NAMES;
 
 #[derive(Debug, thiserror::Error)]
 pub enum OptimizeError {
@@ -115,23 +114,6 @@ pub fn optimize_str_with(input: &str, config: &Config) -> Result<OptimizeOutput,
         animation: report,
         summary,
     })
-}
-
-/// Parse + detect without optimizing (reports / analysis).
-pub fn analyze_svg(
-    input: &str,
-    extra_sources: &[(String, String)],
-) -> Result<AnimationReport, OptimizeError> {
-    let doc = parse::parse_svg(input)?;
-    Ok(detect_document(&doc, extra_sources))
-}
-
-pub fn engine_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
-}
-
-pub fn engine_label() -> &'static str {
-    "minsvg"
 }
 
 #[cfg(test)]

@@ -29,15 +29,6 @@ fn is_xml_s(c: char) -> bool {
 
 pub const PATH_PLUGIN_NAMES: &[&str] = &["convertShapeToPath", "convertPathData", "mergePaths"];
 
-/// Back-compat name used by `lib.rs` / older call sites.
-pub fn run_path_stub(doc: &mut Document) {
-    convert_path_data(doc);
-}
-
-// ===========================================================================
-// convertPathData
-// ===========================================================================
-
 /// Conservative `d` rewrite on path-data hosts. Skips SMIL-animated `d`.
 pub fn convert_path_data(doc: &mut Document) {
     let locked = collect_smil_locked_d_ids(&doc.nodes);
@@ -181,28 +172,7 @@ fn skip_space_before_next(out: &str) -> bool {
 }
 
 fn is_path_command_letter(c: char) -> bool {
-    matches!(
-        c,
-        'M' | 'm'
-            | 'Z'
-            | 'z'
-            | 'L'
-            | 'l'
-            | 'H'
-            | 'h'
-            | 'V'
-            | 'v'
-            | 'C'
-            | 'c'
-            | 'S'
-            | 's'
-            | 'Q'
-            | 'q'
-            | 'T'
-            | 't'
-            | 'A'
-            | 'a'
-    )
+    c.is_ascii() && is_path_command_byte(c as u8)
 }
 
 /// Minify one `d` string. `None` if the path cannot be parsed safely
@@ -234,10 +204,8 @@ pub fn minify_path_d(d: &str) -> Option<String> {
     Some(emitted)
 }
 
-/// Cheap post-emit scan. Replaces a full reparse + bbox on every path.
-///
-/// Catches `6.408 014.1912` (leading `0` glued onto `14.1912`) and `12`+`.297`
-/// → `12.297`. Two-digit `00`/`01` arc flags are allowed.
+/// Cheap post-emit scan for glued numbers (`6.408 014.1912`, `12`+`.297`).
+/// Two-digit `00`/`01` arc flags are allowed.
 fn emit_has_digit_glue(s: &str) -> bool {
     let b = s.as_bytes();
     let mut i = 0;
@@ -316,10 +284,6 @@ fn emit_has_digit_glue(s: &str) -> bool {
     }
     false
 }
-
-// ---------------------------------------------------------------------------
-// Path AST
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
 enum Atom {
@@ -603,8 +567,6 @@ fn optimize_abs(atoms: Vec<Abs>) -> Vec<Abs> {
             _ => {}
         }
 
-        // Drop a line back to the subpath start when the next command is Z
-        // (handled after we know next — second pass).
         match &atom {
             Abs::Move { x, y } => {
                 cx = *x;
@@ -742,10 +704,6 @@ fn drop_lineto_before_close(atoms: Vec<Abs>) -> Vec<Abs> {
     out
 }
 
-// ---------------------------------------------------------------------------
-// Emit
-// ---------------------------------------------------------------------------
-
 fn emit_path(atoms: &[Abs]) -> String {
     emit_path_inner(atoms, false)
 }
@@ -766,6 +724,7 @@ fn emit_path_inner(atoms: &[Abs], abs_first_move: bool) -> String {
     let mut rel_s = String::with_capacity(48);
     let mut abs_n = [0.0f64; 6];
     let mut rel_n = [0.0f64; 6];
+    let mut num_buf = [0u8; 32];
     let mut cx = 0.0;
     let mut cy = 0.0;
     let mut sx = 0.0;
@@ -783,13 +742,27 @@ fn emit_path_inner(atoms: &[Abs], abs_first_move: bool) -> String {
             continue;
         }
 
-        let (abs_l, abs_len, abs_arc) = fill_abs(atom, &mut abs_n);
-        let (rel_l, rel_len, rel_arc) = fill_rel(atom, cx, cy, &mut rel_n);
+        let (abs_l, abs_len, abs_arc) = fill_cmd(atom, 0.0, 0.0, false, &mut abs_n);
+        let (rel_l, rel_len, rel_arc) = fill_cmd(atom, cx, cy, true, &mut rel_n);
 
         abs_s.clear();
         rel_s.clear();
-        write_cmd(&mut abs_s, abs_l, &abs_n[..abs_len], abs_arc, prev);
-        write_cmd(&mut rel_s, rel_l, &rel_n[..rel_len], rel_arc, prev);
+        write_cmd(
+            &mut abs_s,
+            abs_l,
+            &abs_n[..abs_len],
+            abs_arc,
+            prev,
+            &mut num_buf,
+        );
+        write_cmd(
+            &mut rel_s,
+            rel_l,
+            &rel_n[..rel_len],
+            rel_arc,
+            prev,
+            &mut num_buf,
+        );
 
         let use_rel = if first_cmd && abs_first_move {
             false
@@ -840,105 +813,32 @@ fn update_cursor(atom: &Abs, cx: &mut f64, cy: &mut f64, sx: &mut f64, sy: &mut 
     }
 }
 
-fn fill_abs(atom: &Abs, nums: &mut [f64; 6]) -> (char, usize, Option<(bool, bool)>) {
-    match *atom {
-        Abs::Move { x, y } => {
-            nums[0] = x;
-            nums[1] = y;
-            ('M', 2, None)
-        }
-        Abs::Line { x, y } => {
-            nums[0] = x;
-            nums[1] = y;
-            ('L', 2, None)
-        }
-        Abs::H { x } => {
-            nums[0] = x;
-            ('H', 1, None)
-        }
-        Abs::V { y } => {
-            nums[0] = y;
-            ('V', 1, None)
-        }
-        Abs::Cubic {
-            x1,
-            y1,
-            x2,
-            y2,
-            x,
-            y,
-        } => {
-            nums[0] = x1;
-            nums[1] = y1;
-            nums[2] = x2;
-            nums[3] = y2;
-            nums[4] = x;
-            nums[5] = y;
-            ('C', 6, None)
-        }
-        Abs::SmoothC { x2, y2, x, y } => {
-            nums[0] = x2;
-            nums[1] = y2;
-            nums[2] = x;
-            nums[3] = y;
-            ('S', 4, None)
-        }
-        Abs::Quad { x1, y1, x, y } => {
-            nums[0] = x1;
-            nums[1] = y1;
-            nums[2] = x;
-            nums[3] = y;
-            ('Q', 4, None)
-        }
-        Abs::SmoothQ { x, y } => {
-            nums[0] = x;
-            nums[1] = y;
-            ('T', 2, None)
-        }
-        Abs::Arc {
-            rx,
-            ry,
-            rot,
-            large,
-            sweep,
-            x,
-            y,
-        } => {
-            nums[0] = rx;
-            nums[1] = ry;
-            nums[2] = rot;
-            nums[3] = x;
-            nums[4] = y;
-            ('A', 5, Some((large, sweep)))
-        }
-        Abs::Close => ('Z', 0, None),
-    }
-}
-
-fn fill_rel(
+fn fill_cmd(
     atom: &Abs,
     cx: f64,
     cy: f64,
+    rel: bool,
     nums: &mut [f64; 6],
 ) -> (char, usize, Option<(bool, bool)>) {
+    let (dx, dy) = if rel { (cx, cy) } else { (0.0, 0.0) };
     match *atom {
         Abs::Move { x, y } => {
-            nums[0] = x - cx;
-            nums[1] = y - cy;
-            ('m', 2, None)
+            nums[0] = x - dx;
+            nums[1] = y - dy;
+            (if rel { 'm' } else { 'M' }, 2, None)
         }
         Abs::Line { x, y } => {
-            nums[0] = x - cx;
-            nums[1] = y - cy;
-            ('l', 2, None)
+            nums[0] = x - dx;
+            nums[1] = y - dy;
+            (if rel { 'l' } else { 'L' }, 2, None)
         }
         Abs::H { x } => {
-            nums[0] = x - cx;
-            ('h', 1, None)
+            nums[0] = x - dx;
+            (if rel { 'h' } else { 'H' }, 1, None)
         }
         Abs::V { y } => {
-            nums[0] = y - cy;
-            ('v', 1, None)
+            nums[0] = y - dy;
+            (if rel { 'v' } else { 'V' }, 1, None)
         }
         Abs::Cubic {
             x1,
@@ -948,32 +848,32 @@ fn fill_rel(
             x,
             y,
         } => {
-            nums[0] = x1 - cx;
-            nums[1] = y1 - cy;
-            nums[2] = x2 - cx;
-            nums[3] = y2 - cy;
-            nums[4] = x - cx;
-            nums[5] = y - cy;
-            ('c', 6, None)
+            nums[0] = x1 - dx;
+            nums[1] = y1 - dy;
+            nums[2] = x2 - dx;
+            nums[3] = y2 - dy;
+            nums[4] = x - dx;
+            nums[5] = y - dy;
+            (if rel { 'c' } else { 'C' }, 6, None)
         }
         Abs::SmoothC { x2, y2, x, y } => {
-            nums[0] = x2 - cx;
-            nums[1] = y2 - cy;
-            nums[2] = x - cx;
-            nums[3] = y - cy;
-            ('s', 4, None)
+            nums[0] = x2 - dx;
+            nums[1] = y2 - dy;
+            nums[2] = x - dx;
+            nums[3] = y - dy;
+            (if rel { 's' } else { 'S' }, 4, None)
         }
         Abs::Quad { x1, y1, x, y } => {
-            nums[0] = x1 - cx;
-            nums[1] = y1 - cy;
-            nums[2] = x - cx;
-            nums[3] = y - cy;
-            ('q', 4, None)
+            nums[0] = x1 - dx;
+            nums[1] = y1 - dy;
+            nums[2] = x - dx;
+            nums[3] = y - dy;
+            (if rel { 'q' } else { 'Q' }, 4, None)
         }
         Abs::SmoothQ { x, y } => {
-            nums[0] = x - cx;
-            nums[1] = y - cy;
-            ('t', 2, None)
+            nums[0] = x - dx;
+            nums[1] = y - dy;
+            (if rel { 't' } else { 'T' }, 2, None)
         }
         Abs::Arc {
             rx,
@@ -987,11 +887,11 @@ fn fill_rel(
             nums[0] = rx;
             nums[1] = ry;
             nums[2] = rot;
-            nums[3] = x - cx;
-            nums[4] = y - cy;
-            ('a', 5, Some((large, sweep)))
+            nums[3] = x - dx;
+            nums[4] = y - dy;
+            (if rel { 'a' } else { 'A' }, 5, Some((large, sweep)))
         }
-        Abs::Close => ('z', 0, None),
+        Abs::Close => (if rel { 'z' } else { 'Z' }, 0, None),
     }
 }
 
@@ -1001,6 +901,7 @@ fn write_cmd(
     nums: &[f64],
     arc_flags: Option<(bool, bool)>,
     prev: Option<char>,
+    buf: &mut [u8; 32],
 ) {
     let omit = prev == Some(letter)
         || (prev == Some('M') && letter == 'L')
@@ -1009,33 +910,31 @@ fn write_cmd(
         out.push(letter);
     }
     if let Some((large, sweep)) = arc_flags {
-        // rx ry rot  [flags]  x y   — nums is [rx, ry, rot, x, y]
         if nums.len() != 5 {
             for n in nums {
-                push_num(out, *n);
+                push_num(out, *n, buf);
             }
             return;
         }
-        push_num(out, nums[0]);
-        push_num(out, nums[1]);
-        push_num(out, nums[2]);
+        push_num(out, nums[0], buf);
+        push_num(out, nums[1], buf);
+        push_num(out, nums[2], buf);
         if out.chars().next_back().is_some_and(|c| c.is_ascii_digit()) {
             out.push(' ');
         }
         out.push(if large { '1' } else { '0' });
         out.push(if sweep { '1' } else { '0' });
-        push_num(out, nums[3]);
-        push_num(out, nums[4]);
+        push_num(out, nums[3], buf);
+        push_num(out, nums[4], buf);
     } else {
         for n in nums {
-            push_num(out, *n);
+            push_num(out, *n, buf);
         }
     }
 }
 
-fn push_num(out: &mut String, n: f64) {
-    let mut buf = [0u8; 32];
-    let s = write_compact_f64(&mut buf, n);
+fn push_num(out: &mut String, n: f64, buf: &mut [u8; 32]) {
+    let s = write_compact_f64(buf, n);
     if needs_sep(out, s) {
         out.push(' ');
     }
@@ -1123,9 +1022,7 @@ fn write_compact_f64<'a>(buf: &'a mut [u8; 32], n: f64) -> &'a str {
     }
     i -= 1;
     buf[i] = b'.';
-    if int == 0 {
-        // ".18" / "-.5"
-    } else {
+    if int != 0 {
         let mut v = int;
         while v > 0 {
             i -= 1;
@@ -1197,10 +1094,6 @@ pub fn minify_number_lexeme(raw: &str) -> String {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Parser
-// ---------------------------------------------------------------------------
 
 struct Parser<'a> {
     b: &'a [u8],
@@ -1423,10 +1316,6 @@ fn parse_path(d: &str) -> Option<Vec<Atom>> {
     Some(atoms)
 }
 
-// ===========================================================================
-// convertShapeToPath (icon-only)
-// ===========================================================================
-
 /// `line` / `polyline` / axis-aligned `rect` → `<path>`. No circles, no rounded rects.
 pub fn convert_shape_to_path(doc: &mut Document) {
     doc.walk_elements_mut(&mut |el| {
@@ -1539,10 +1428,6 @@ fn parse_points(s: &str) -> Vec<(f64, f64)> {
     }
     out
 }
-
-// ===========================================================================
-// mergePaths (icon-only)
-// ===========================================================================
 
 /// Concatenate consecutive sibling paths that share paint attributes.
 /// Returns whether any pair was merged.
@@ -1737,28 +1622,6 @@ fn filtered_attrs(el: &Element) -> Vec<(&str, &str)> {
     v
 }
 
-/// Refuse a rewrite that browsers would paint as a 2–3 point wreck.
-#[cfg(test)]
-fn path_rewrite_is_sane_precomputed(
-    orig_pts: usize,
-    orig_bbox: Option<(f64, f64, f64, f64)>,
-    emitted: &str,
-) -> bool {
-    let Some(reparsed) = parse_path(emitted) else {
-        return false;
-    };
-    let new_abs = to_abs(&reparsed);
-    let new_pts = dest_point_count(&new_abs);
-    if orig_pts >= 8 && new_pts <= 3 {
-        return false;
-    }
-    match (orig_bbox, path_bbox(&new_abs)) {
-        (None, None) => true,
-        (Some(a), Some(b)) => bbox_close(a, b),
-        _ => false,
-    }
-}
-
 fn dest_point_count(atoms: &[Abs]) -> usize {
     atoms.iter().filter(|a| !matches!(a, Abs::Close)).count()
 }
@@ -1830,10 +1693,6 @@ fn bbox_close(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
         && (a.3 - b.3).abs() <= tol
 }
 
-// ===========================================================================
-// SMIL-animated `d`
-// ===========================================================================
-
 fn collect_smil_locked_d_ids(nodes: &[Node]) -> HashSet<String> {
     let mut out = HashSet::new();
     walk_smil_d_locks(nodes, &mut out);
@@ -1880,10 +1739,6 @@ fn is_smil_tag(local: &str) -> bool {
 fn attr_is_d(v: Option<&str>) -> bool {
     v.is_some_and(|s| s.eq_ignore_ascii_case("d"))
 }
-
-// ===========================================================================
-// Tests
-// ===========================================================================
 
 #[cfg(test)]
 mod tests {
@@ -2315,7 +2170,7 @@ mod tests {
             "collapsed to a triangle: {out}"
         );
         assert!(
-            path_rewrite_is_sane_precomputed(dest_point_count(&orig), path_bbox(&orig), &out),
+            bbox_compatible(path_bbox(&orig), path_bbox(&got)),
             "bbox/dest-count guard failed: {out}"
         );
         let (x0, y0, x1, y1) = path_bbox(&got).unwrap();

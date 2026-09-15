@@ -10,12 +10,11 @@
 
 use crate::animation::collect_smil_sync_ids;
 use crate::ast::{Document, Element, Node};
+use crate::plugin_minify::{collect_url_ids, is_smil_element, is_zero_number};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use std::collections::{BTreeSet, HashSet};
 use std::io::Cursor;
-
-pub const RASTER_PLUGIN_NAMES: &[&str] = &["recompressEmbeddedRasters"];
 
 const HREF_KEYS: &[&str] = &["href", "xlink:href"];
 
@@ -52,10 +51,10 @@ fn recompress_image_hrefs(el: &mut Element) {
 }
 
 fn minify_image_wrapper(el: &mut Element) {
-    if el.attr("x").is_some_and(is_default_zero) {
+    if el.attr("x").is_some_and(is_zero_number) {
         el.remove_attr("x");
     }
-    if el.attr("y").is_some_and(is_default_zero) {
+    if el.attr("y").is_some_and(is_zero_number) {
         el.remove_attr("y");
     }
     let par = el
@@ -115,7 +114,7 @@ fn compact_visibility_smil(el: &mut Element) {
         let Node::Element(anim) = child else {
             continue;
         };
-        if !is_smil(anim.local_name()) {
+        if !is_smil_element(anim.local_name()) {
             continue;
         }
         let attr = anim
@@ -148,13 +147,6 @@ fn is_default_begin(v: &str) -> bool {
     matches!(v.trim(), "0" | "0s" | "0.0" | "0.0s" | "0ms")
 }
 
-fn is_smil(local: &str) -> bool {
-    matches!(
-        local.to_ascii_lowercase().as_str(),
-        "animate" | "animatetransform" | "animatemotion" | "animatecolor" | "set"
-    )
-}
-
 /// When many sibling `<image>`s share a box and most start hidden (SMIL
 /// frame stacks), one `<style>` is shorter than repeating attrs.
 fn hoist_shared_image_css(nodes: &mut [Node]) {
@@ -182,7 +174,7 @@ fn hoist_shared_image_css_in(parent: &mut Element) {
 
     let mut box_hw: Option<(String, String)> = None;
     let mut box_ok = true;
-    let mut hidden_idxs = Vec::new();
+    let mut hidden_n = 0usize;
     for &i in &image_idxs {
         let Node::Element(img) = &parent.children[i] else {
             continue;
@@ -199,12 +191,12 @@ fn hoist_shared_image_css_in(parent: &mut Element) {
             .attr("visibility")
             .is_some_and(|v| v.eq_ignore_ascii_case("hidden"))
         {
-            hidden_idxs.push(i);
+            hidden_n += 1;
         }
     }
 
     let hoist_box = box_ok && box_hw.is_some();
-    let hoist_hidden = hidden_idxs.len() >= 2;
+    let hoist_hidden = hidden_n >= 2;
     if !hoist_box && !hoist_hidden {
         return;
     }
@@ -221,9 +213,6 @@ fn hoist_shared_image_css_in(parent: &mut Element) {
     }
     if hoist_hidden {
         css.push_str("image.rf{visibility:hidden}");
-    }
-    if css.is_empty() {
-        return;
     }
 
     for &i in &image_idxs {
@@ -325,7 +314,7 @@ fn try_flatten_raster_group(g: &Element, refs: &HashSet<String>) -> Option<Eleme
                 }
                 image = Some(el.clone());
             }
-            Node::Element(el) if is_smil(el.local_name()) => {
+            Node::Element(el) if is_smil_element(el.local_name()) => {
                 let attr = el
                     .attr("attributeName")
                     .or_else(|| el.attr("attributename"))
@@ -381,16 +370,6 @@ fn is_identity_transform(s: &str) -> bool {
     )
 }
 
-fn is_default_zero(s: &str) -> bool {
-    let t = s.trim();
-    let t = t
-        .strip_suffix("px")
-        .or_else(|| t.strip_suffix("PX"))
-        .unwrap_or(t)
-        .trim();
-    t == "0" || t.parse::<f64>() == Ok(0.0)
-}
-
 fn parse_user_unit(s: &str) -> Option<f64> {
     let t = s.trim();
     if t.ends_with('%') {
@@ -431,39 +410,16 @@ fn walk_pointer_ids(nodes: &[Node], out: &mut HashSet<String>) {
                 collect_smil_sync_ids(v, &mut sync);
                 out.extend(sync);
             }
-            pull_url_ids(v, out);
+            collect_url_ids(v, out);
         }
         if el.local_name() == "style" {
             for child in &el.children {
                 if let Node::Text(t) = child {
-                    pull_url_ids(t, out);
+                    collect_url_ids(t, out);
                 }
             }
         }
         walk_pointer_ids(&el.children, out);
-    }
-}
-
-fn pull_url_ids(value: &str, out: &mut HashSet<String>) {
-    let folded = value.to_ascii_lowercase();
-    let mut cursor = 0;
-    while let Some(rel) = folded[cursor..].find("url(") {
-        let open = cursor + rel + 4;
-        let tail = value.get(open..).unwrap_or("");
-        let trimmed = tail.trim_start().trim_start_matches(['\'', '"']);
-        if let Some(rest) = trimmed.strip_prefix('#') {
-            let id: String = rest
-                .chars()
-                .take_while(|c| *c != ')' && *c != '\'' && *c != '"' && !c.is_whitespace())
-                .collect();
-            if !id.is_empty() {
-                out.insert(id);
-            }
-        }
-        cursor = open.saturating_add(1);
-        if cursor >= value.len() {
-            break;
-        }
     }
 }
 

@@ -12,7 +12,7 @@
 //! Sibling-directory JS/TS/CSS walk is **not** automatic. Pass extra file
 //! texts via [`Config::extra_sources`]. A full workspace scan is TODO.
 
-use crate::ast::{Document, Element, Node};
+use crate::ast::{Document, Node};
 use std::collections::{BTreeSet, HashMap};
 
 /// Plugins we refuse to run (or would refuse, if implemented) on motion docs.
@@ -35,24 +35,11 @@ pub enum AnimationKind {
     ExternalIds,
 }
 
-impl AnimationKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Smil => "smil",
-            Self::CssKeyframes => "css-keyframes",
-            Self::Script => "script",
-            Self::Events => "events",
-            Self::ExternalIds => "external-ids",
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct AnimationReport {
     pub motion_sensitive: bool,
     pub kinds: Vec<AnimationKind>,
     pub plugins_skipped: Vec<&'static str>,
-    pub input_ids: u32,
     pub ids_preserved: u32,
     pub external_ids: Vec<String>,
     pub smil_sync_refs: Vec<String>,
@@ -67,19 +54,12 @@ impl Default for AnimationReport {
             motion_sensitive: false,
             kinds: vec![],
             plugins_skipped: vec![],
-            input_ids: 0,
             ids_preserved: 0,
             external_ids: vec![],
             smil_sync_refs: vec![],
             workspace_scan: "not-run".into(),
             summary: String::new(),
         }
-    }
-}
-
-impl AnimationReport {
-    pub fn kind_labels(&self) -> Vec<&'static str> {
-        self.kinds.iter().map(|k| k.as_str()).collect()
     }
 }
 
@@ -127,7 +107,6 @@ pub fn detect_document(doc: &Document, extra_sources: &[(String, String)]) -> An
         motion_sensitive,
         kinds: kinds.into_iter().collect(),
         plugins_skipped: Vec::new(),
-        input_ids: count_ids_in_nodes(&doc.nodes),
         ids_preserved: 0,
         external_ids: extra_ids,
         smil_sync_refs: smil_sync.into_iter().collect(),
@@ -216,19 +195,6 @@ fn walk_id_names(nodes: &[Node], out: &mut BTreeSet<String>) {
     }
 }
 
-fn count_ids_in_nodes(nodes: &[Node]) -> u32 {
-    let mut n = 0u32;
-    for node in nodes {
-        if let Node::Element(el) = node {
-            if el.attr("id").is_some() {
-                n = n.saturating_add(1);
-            }
-            n = n.saturating_add(count_ids_in_nodes(&el.children));
-        }
-    }
-    n
-}
-
 const SMIL_TAGS: &[&str] = &[
     "animate",
     "animatetransform",
@@ -245,12 +211,6 @@ fn walk_detect(nodes: &[Node], kinds: &mut BTreeSet<AnimationKind>, smil: &mut B
         let local = el.local_name().to_ascii_lowercase();
         if SMIL_TAGS.contains(&local.as_str()) {
             kinds.insert(AnimationKind::Smil);
-            if let Some(v) = el.attr("begin") {
-                collect_smil_sync_ids(v, smil);
-            }
-            if let Some(v) = el.attr("end") {
-                collect_smil_sync_ids(v, smil);
-            }
         }
         if local == "script" {
             kinds.insert(AnimationKind::Script);
@@ -562,22 +522,6 @@ pub fn rewrite_smil_clock_value(value: &str, rename: &HashMap<String, String>) -
     parts.concat()
 }
 
-/// Apply [`rewrite_smil_clock_value`] to every `begin`/`end` in the tree.
-#[allow(dead_code)]
-pub fn rewrite_smil_sync_attrs(el: &mut Element, rename: &HashMap<String, String>) {
-    for (k, v) in el.attrs.iter_mut() {
-        let local = k.rsplit_once(':').map(|(_, l)| l).unwrap_or(k.as_str());
-        if local == "begin" || local == "end" {
-            *v = rewrite_smil_clock_value(v, rename);
-        }
-    }
-    for child in &mut el.children {
-        if let Node::Element(child) = child {
-            rewrite_smil_sync_attrs(child, rename);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -699,30 +643,6 @@ mod tests {
     #[test]
     fn count_id_attrs_finds_quoted() {
         assert_eq!(count_id_attrs(r#"<g id="a"><b id='c'/></g>"#), 2);
-    }
-
-    #[test]
-    fn rewrite_y1_end_offset_with_prefix_map() {
-        let mut map = HashMap::new();
-        map.insert("y1".into(), "pfx-y1".into());
-        assert_eq!(
-            rewrite_smil_clock_value("0s; y1.end+.33s", &map),
-            "0s; pfx-y1.end+.33s"
-        );
-    }
-
-    #[test]
-    fn parses_b_end_minus_and_a_begin_plus() {
-        let minus = parse_smil_clock_value("b.end-0.5s");
-        assert_eq!(minus.len(), 1);
-        assert_eq!(minus[0].id, "b");
-        assert_eq!(minus[0].event, "end");
-        assert_eq!(minus[0].offset.as_deref(), Some("-0.5s"));
-        let plus = parse_smil_clock_value("a.begin+0.1s");
-        assert_eq!(plus.len(), 1);
-        assert_eq!(plus[0].id, "a");
-        assert_eq!(plus[0].event, "begin");
-        assert_eq!(plus[0].offset.as_deref(), Some("+0.1s"));
     }
 
     #[test]

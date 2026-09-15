@@ -66,6 +66,22 @@ fn smil_hidden_frames_are_not_deleted() {
 }
 
 #[test]
+fn url_paint_id_case_is_not_folded() {
+    // Tiny stand-in for onsen `url(#poolFill)` — no 8MB coat, same case assert.
+    let input = concat!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">"##,
+        r##"<defs><linearGradient id="poolFill">"##,
+        r##"<stop offset="0" stop-color="#fba"/></linearGradient></defs>"##,
+        r##"<ellipse fill="url(#poolFill)" cx="5" cy="5" rx="4" ry="3"/>"##,
+        "</svg>",
+    );
+    let out = optimize_str(input).expect("optimize");
+    assert!(out.svg.contains("id=\"poolFill\""), "{}", out.svg);
+    assert!(out.svg.contains("url(#poolFill)"), "{}", out.svg);
+    assert!(!out.svg.contains("url(#poolfill)"), "{}", out.svg);
+}
+
+#[test]
 fn reoptimize_is_stable_enough_to_parse() {
     let bytes = read_fixture("circle_icon.svg");
     let input = std::str::from_utf8(&bytes).unwrap();

@@ -1,43 +1,10 @@
-//! Clean-room minify plugins (SVGO-inspired names, not a port of any Rust optimizer).
+//! Clean-room minify plugins (SVGO-inspired names, not a port of any optimizer).
 //!
-//! Owned by agent-11. **Not wired yet** — merge-wire must `mod plugin_minify` in
-//! `lib.rs` and call these from `plugins::run_default`. Until then this file is
-//! the implementation + unit tests only.
-//!
-//! Public behaviour follows published SVGO plugin docs (svgo.dev) and the
-//! high-level oxvg pattern (LightningCSS for real stylesheets — **not** vendored
-//! here; see `tasks/inbox/`). Conservative defaults:
-//!
-//! * [`minify_styles`] — comment/whitespace minify; no rule restructure, no
-//!   unused-selector deletion (that needs a real CSS engine).
-//! * [`convert_colors`] — shortest equivalent among name / hex / short-hex;
-//!   `rgb()`/`hsl()` only when opaque. Never `currentColor`.
-//! * [`cleanup_ids`] — **unused only**; never rename. Skip the document when
-//!   `<script>` or `on*` handlers are present.
-//! * [`remove_useless_stroke_and_fill`] — presentation + `style` attr only;
-//!   inheritance-aware; no element deletion (`removeNone` stays off).
-//! * [`collapse_whitespace`] — drop ignorable text nodes; honor `xml:space`.
-//!
-//! References (public docs, not source):
-//! <https://svgo.dev/docs/plugins/minifyStyles/>
-//! <https://svgo.dev/docs/plugins/convertColors/>
-//! <https://svgo.dev/docs/plugins/cleanupIds/>
-//! <https://svgo.dev/docs/plugins/removeUselessStrokeAndFill/>
-//! <https://docs.rs/oxvg_optimiser/latest/oxvg_optimiser/struct.MinifyStyles.html>
+//! Conservative defaults: unused-only `cleanupIds` (keep `url(#Id)` case),
+//! non-zero CSS `px` stays, no `currentColor`, no unused-selector deletion.
 
 use crate::ast::{Document, Element, Node};
 use std::collections::HashSet;
-
-/// Names in the same relative order as the MVP `run_default` minify slice.
-pub const MINIFY_PLUGIN_NAMES: &[&str] = &[
-    "minifyStyles",
-    "convertColors",
-    "cleanupNumericValues",
-    "cleanupIds",
-    "removeUselessStrokeAndFill",
-    "convertEllipseToCircle",
-    "collapseWhitespace",
-];
 
 /// SVGO `cleanupNumericValues` default. Applied to presentation attrs only —
 /// never to path `d` (that is convertPathData / a sibling).
@@ -195,7 +162,7 @@ pub fn cleanup_numeric_values(doc: &mut Document) {
     });
 }
 
-fn is_smil_element(local: &str) -> bool {
+pub(crate) fn is_smil_element(local: &str) -> bool {
     matches!(
         local.to_ascii_lowercase().as_str(),
         "animate" | "animatetransform" | "animatemotion" | "animatecolor" | "set"
@@ -244,10 +211,6 @@ fn is_numeric_attr(name: &str) -> bool {
             | "stroke-dashoffset"
             | "stroke-dasharray"
             | "opacity"
-            | "fill-opacity"
-            | "stroke-opacity"
-            | "stop-opacity"
-            | "flood-opacity"
             | "offset"
             | "dx"
             | "dy"
@@ -624,7 +587,8 @@ fn minify_css_value(v: &str) -> String {
         return t.to_string();
     }
     // Lossless only — do not precision-3 `stroke-width:.99986893` on the map.
-    if t.starts_with("url(") || t.starts_with("var(") || t.contains('(') {
+    // `url(` / `var(` / `calc(` all contain `(`; leave the argument intact.
+    if t.contains('(') {
         return t.to_string();
     }
     // CSS lengths (stylesheet + `style=""`) must keep non-zero `px`.
@@ -877,17 +841,7 @@ fn drop_one_empty_rule(s: &str) -> String {
 // ===========================================================================
 
 fn is_color_attr(name: &str) -> bool {
-    matches!(
-        name,
-        "fill"
-            | "stroke"
-            | "stop-color"
-            | "flood-color"
-            | "lighting-color"
-            | "color"
-            | "solid-color"
-            | "viewport-fill"
-    ) || name.ends_with("-color")
+    matches!(name, "fill" | "stroke" | "color" | "viewport-fill") || name.ends_with("-color")
 }
 
 fn is_untouched_color_keyword(s: &str) -> bool {
@@ -943,13 +897,12 @@ fn rewrite_css_colors(css: &str) -> String {
     let mut out = String::with_capacity(css.len());
     let mut rest = css;
     while !rest.is_empty() {
-        if let Some((prop, after_colon)) = next_color_prop(rest) {
+        if let Some(after_colon) = next_color_prop(rest) {
             let prefix_end = rest.len() - after_colon.len();
             out.push_str(&rest[..prefix_end]);
             let (value, tail) = split_decl_value(after_colon);
             out.push_str(&convert_color_value(&value));
             rest = tail;
-            let _ = prop;
         } else {
             out.push_str(rest);
             break;
@@ -958,7 +911,7 @@ fn rewrite_css_colors(css: &str) -> String {
     out
 }
 
-fn next_color_prop(s: &str) -> Option<(&str, &str)> {
+fn next_color_prop(s: &str) -> Option<&str> {
     let bytes = s.as_bytes();
     let mut i = 0;
     let mut quote: Option<u8> = None;
@@ -991,7 +944,7 @@ fn next_color_prop(s: &str) -> Option<(&str, &str)> {
             }
             let prop = s[start..i].trim();
             if is_color_attr(prop) {
-                return Some((prop, &s[i + 1..]));
+                return Some(&s[i + 1..]);
             }
         }
         i += 1;
@@ -1117,10 +1070,10 @@ fn hex_pair(a: u8, b: u8) -> Option<u8> {
 }
 
 fn hex_val(b: u8) -> Option<u8> {
+    // `parse_hex` is only fed lowercased input.
     match b {
         b'0'..=b'9' => Some(b - b'0'),
         b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
         _ => None,
     }
 }
@@ -1138,10 +1091,8 @@ fn parse_rgb_fn(s: &str) -> Option<Rgb> {
     if channels.len() != 3 {
         return None;
     }
-    if has_rgba || alpha.is_some() {
-        if !alpha_is_opaque(alpha.unwrap_or("1")) {
-            return None;
-        }
+    if (has_rgba || alpha.is_some()) && !is_one(alpha.unwrap_or("1")) {
+        return None;
     }
     Some(Rgb {
         r: parse_rgb_channel(channels[0])?,
@@ -1163,10 +1114,8 @@ fn parse_hsl_fn(s: &str) -> Option<Rgb> {
     if channels.len() != 3 {
         return None;
     }
-    if has_hsla || alpha.is_some() {
-        if !alpha_is_opaque(alpha.unwrap_or("1")) {
-            return None;
-        }
+    if (has_hsla || alpha.is_some()) && !is_one(alpha.unwrap_or("1")) {
+        return None;
     }
     let h = parse_hue(channels[0])?;
     let sat = parse_percent(channels[1])?;
@@ -1201,19 +1150,6 @@ fn split_color_fn_args(inner: &str) -> Option<(Vec<&str>, Option<&str>)> {
     }
 }
 
-fn alpha_is_opaque(s: &str) -> bool {
-    let t = s.trim();
-    if let Some(p) = t.strip_suffix('%') {
-        return p
-            .parse::<f32>()
-            .ok()
-            .is_some_and(|n| (n - 100.0).abs() < 0.05);
-    }
-    t.parse::<f32>()
-        .ok()
-        .is_some_and(|n| (n - 1.0).abs() < 0.001)
-}
-
 fn parse_rgb_channel(s: &str) -> Option<u8> {
     let s = s.trim();
     if let Some(p) = s.strip_suffix('%') {
@@ -1232,11 +1168,8 @@ fn parse_percent(s: &str) -> Option<f32> {
 }
 
 fn parse_hue(s: &str) -> Option<f32> {
-    let t = s
-        .trim()
-        .trim_end_matches("deg")
-        .trim_end_matches("DEG")
-        .trim();
+    // Caller already lowercased the color function.
+    let t = s.trim().trim_end_matches("deg").trim();
     if t.ends_with("rad") || t.ends_with("turn") || t.ends_with("grad") {
         return None;
     }
@@ -1468,46 +1401,9 @@ fn document_has_script(nodes: &[Node]) -> bool {
 }
 
 fn is_event_attr(name: &str) -> bool {
-    // Must not treat presentation attrs such as `opacity` as handlers.
+    // Presentation attrs (`opacity`, `orient`, …) do not start with `on`.
     let n = name.rsplit_once(':').map(|(_, l)| l).unwrap_or(name);
-    matches!(
-        n.to_ascii_lowercase().as_str(),
-        "onclick"
-            | "onload"
-            | "onunload"
-            | "onbegin"
-            | "onend"
-            | "onrepeat"
-            | "onfocus"
-            | "onblur"
-            | "onactivate"
-            | "onmouseover"
-            | "onmouseout"
-            | "onmousedown"
-            | "onmouseup"
-            | "onmousemove"
-            | "onmouseenter"
-            | "onmouseleave"
-            | "onkeydown"
-            | "onkeyup"
-            | "onkeypress"
-            | "onabort"
-            | "onerror"
-            | "onresize"
-            | "onscroll"
-            | "onchange"
-            | "oninput"
-            | "onsubmit"
-            | "onfocusin"
-            | "onfocusout"
-            | "ontouchstart"
-            | "ontouchend"
-            | "ontouchmove"
-            | "onpointerdown"
-            | "onpointerup"
-            | "onpointermove"
-            | "onzoom"
-    )
+    n.to_ascii_lowercase().starts_with("on")
 }
 
 fn collect_refs(nodes: &[Node], out: &mut HashSet<String>) {
@@ -1566,11 +1462,14 @@ fn push_hash_id(value: &str, out: &mut HashSet<String>) {
     }
 }
 
-fn collect_url_ids(value: &str, out: &mut HashSet<String>) {
-    let mut search = value;
-    while let Some(idx) = search.find("url(") {
-        let after = &search[idx + 4..];
-        let trimmed = after.trim_start().trim_start_matches(['\'', '"']);
+pub(crate) fn collect_url_ids(value: &str, out: &mut HashSet<String>) {
+    // Case-insensitive `url(`; the `#Id` argument stays verbatim.
+    let folded = value.to_ascii_lowercase();
+    let mut cursor = 0;
+    while let Some(rel) = folded[cursor..].find("url(") {
+        let open = cursor + rel + 4;
+        let tail = value.get(open..).unwrap_or("");
+        let trimmed = tail.trim_start().trim_start_matches(['\'', '"']);
         if let Some(rest) = trimmed.strip_prefix('#') {
             let id: String = rest
                 .chars()
@@ -1580,9 +1479,9 @@ fn collect_url_ids(value: &str, out: &mut HashSet<String>) {
                 out.insert(id);
             }
         }
-        match after.find(')') {
-            Some(end) => search = &after[end + 1..],
-            None => break,
+        cursor = open.saturating_add(1);
+        if cursor >= value.len() {
+            break;
         }
     }
 }
@@ -1969,7 +1868,7 @@ fn is_complex_paint(s: &str) -> bool {
     t.starts_with("url(") || t.starts_with("var(") || t.contains("currentcolor")
 }
 
-fn is_zero_number(s: &str) -> bool {
+pub(crate) fn is_zero_number(s: &str) -> bool {
     let t = s.trim();
     if t.is_empty() {
         return false;

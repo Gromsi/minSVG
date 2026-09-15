@@ -11,9 +11,6 @@
 //! - [oxvg_optimiser](https://docs.rs/oxvg_optimiser/latest/oxvg_optimiser/)
 //!   job summaries (`Remove*` / `CleanupAttrs`)
 //! - [Vexy SVGO plugin reference](https://vexy.dev/vexy-svgo/user/plugins/)
-//!
-//! This module is **not wired** into `lib.rs` / `plugins.rs`. Merge-wire should
-//! `mod plugin_strip;` and replace the monolith strip fns with these.
 
 use crate::ast::{Document, Element, Node};
 use std::collections::HashSet;
@@ -329,23 +326,25 @@ where
 }
 
 /// SVG 2 containers plus common empty-after-cleanup paint / a11y wrappers.
-/// `<svg>` is listed so we can recognize it — it is never dropped.
-fn container_kind(local: &str) -> ContainerKind {
-    match local {
-        "svg" => ContainerKind::Root,
-        "a" | "clipPath" | "defs" | "g" | "marker" | "mask" | "pattern" | "switch" | "symbol"
-        | "unknown" | "linearGradient" | "radialGradient" | "title" | "desc" | "missing-glyph" => {
-            ContainerKind::Droppable
-        }
-        _ => ContainerKind::NotContainer,
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ContainerKind {
-    Root,
-    Droppable,
-    NotContainer,
+/// `<svg>` is never in this set and is never dropped.
+fn is_droppable_container(local: &str) -> bool {
+    matches!(
+        local,
+        "a" | "clipPath"
+            | "defs"
+            | "g"
+            | "marker"
+            | "mask"
+            | "pattern"
+            | "switch"
+            | "symbol"
+            | "unknown"
+            | "linearGradient"
+            | "radialGradient"
+            | "title"
+            | "desc"
+            | "missing-glyph"
+    )
 }
 
 fn drop_empty_containers(nodes: &mut Vec<Node>, refs: &HashSet<String>) {
@@ -361,7 +360,7 @@ fn empty_container_may_drop(node: &Node, refs: &HashSet<String>) -> bool {
     let Node::Element(el) = node else {
         return false;
     };
-    if container_kind(el.local_name()) != ContainerKind::Droppable {
+    if !is_droppable_container(el.local_name()) {
         return false;
     }
     if let Some(id) = el.attr("id") {
@@ -643,11 +642,6 @@ fn is_hidden_droppable(node: &Node, refs: &HashSet<String>) -> bool {
     };
     if el.local_name() == "svg" {
         return false;
-    }
-    if let Some(id) = el.attr("id") {
-        if refs.contains(id) {
-            return false;
-        }
     }
     if subtree_has_referenced_id(el, refs) {
         return false;

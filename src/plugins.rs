@@ -36,10 +36,6 @@ pub const DEFAULT_PLUGIN_NAMES: &[&str] = &[
     "mergePaths",
 ];
 
-pub fn run_default(doc: &mut Document, plan: &PluginPlan) {
-    run_default_skipping(doc, plan, &[]);
-}
-
 pub fn run_default_skipping(doc: &mut Document, plan: &PluginPlan, skip: &[String]) {
     let on = |name: &str| !skip.iter().any(|s| s.eq_ignore_ascii_case(name));
     if on("removeDoctype") {

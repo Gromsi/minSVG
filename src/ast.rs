@@ -4,8 +4,6 @@
 //! attributes. Reference engines use arenas / bump allocators for speed; that
 //! is a later optimization, not a v1 requirement.
 
-use std::fmt;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Document {
     pub nodes: Vec<Node>,
@@ -137,10 +135,4 @@ pub fn local_name(name: &str) -> &str {
 
 pub fn prefix(name: &str) -> Option<&str> {
     name.split_once(':').map(|(p, _)| p)
-}
-
-impl fmt::Display for Element {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<{}>", self.name)
-    }
 }
