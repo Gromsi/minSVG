@@ -1,0 +1,3 @@
+# MSRV pin. Matches Cargo.toml rust-version = "1.83". Do not bump.
+[toolchain]
+channel = "1.83.0"

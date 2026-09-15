@@ -7,13 +7,33 @@
 //! - [SVGO plugin pages](https://svgo.dev/docs/plugins/) (`removeDoctype`,
 //!   `removeXMLProcInst`, `removeComments`, `removeMetadata`,
 //!   `removeEditorsNSData`, `cleanupAttrs`, `removeEmptyAttrs`,
-//!   `removeEmptyContainers`, `removeUnusedNS`)
+//!   `removeEmptyContainers`, `removeUnusedNS`,
+//!   `removeNonInheritableGroupAttrs`, `cleanupEnableBackground`,
+//!   `removeUselessDefs`, `removeDesc`, `removeUnknownsAndDefaults`,
+//!   `moveElemsAttrsToGroup`, `moveGroupAttrsToElems`, `sortAttrs`,
+//!   `sortDefsChildren`)
+//! - [SVG 1.1 property index](https://www.w3.org/TR/SVG11/propidx.html)
+//!   (inherit column — group attr safety / presentation initials)
 //! - [oxvg_optimiser](https://docs.rs/oxvg_optimiser/latest/oxvg_optimiser/)
-//!   job summaries (`Remove*` / `CleanupAttrs`)
+//!   job summaries (`Remove*` / `CleanupAttrs` / `CleanupEnableBackground` /
+//!   `MoveElemsAttrsToGroup` / `MoveGroupAttrsToElems` /
+//!   `SortAttrs` / `SortDefsChildren`)
 //! - [Vexy SVGO plugin reference](https://vexy.dev/vexy-svgo/user/plugins/)
+//!
+//! Merge-wire (`plugins.rs`, not this file): call
+//! [`remove_unknowns_and_defaults`], [`remove_non_inheritable_group_attrs`],
+//! [`cleanup_enable_background`], [`move_elems_attrs_to_group`],
+//! [`move_group_attrs_to_elems`], [`sort_attrs`], and [`sort_defs_children`]
+//! from `run_default` (SVGO 4.1.0 default IDs). Do **not** enable
+//! `removeViewBox` / `removeTitle`. `removeHiddenElems` stays motion-gated
+//! and also refuses SMIL `visibility` frames if invoked directly.
+//! `removeUnknownsAndDefaults` never deletes elements and never drops
+//! `role` / `viewBox` / `xmlns` / `<title>`.
 
+use crate::animation::parse_smil_clock_value;
 use crate::ast::{Document, Element, Node};
-use std::collections::HashSet;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 
 /// SVGO / oxvg / vexy names for the strip subset, in preset-default order.
 pub const STRIP_PLUGIN_NAMES: &[&str] = &[
@@ -25,19 +45,27 @@ pub const STRIP_PLUGIN_NAMES: &[&str] = &[
     "cleanupAttrs",
     "removeEmptyAttrs",
     "removeDeprecatedAttrs",
+    "removeUnknownsAndDefaults",
     "removeUselessDefs",
+    "removeNonInheritableGroupAttrs",
+    "cleanupEnableBackground",
     "removeDesc",
     "removeEmptyText",
     "removeHiddenElems",
+    "moveElemsAttrsToGroup",
+    "moveGroupAttrsToElems",
     "collapseGroups",
     "removeEmptyContainers",
     "removeUnusedNS",
+    "sortAttrs",
+    "sortDefsChildren",
 ];
 
 /// Run the strip subset. Minify / color / id plugins stay elsewhere.
 ///
-/// `removeUnusedNS` is last on purpose: metadata + editor stripping is what
-/// leaves dead `xmlns:*` on the root (high-ROI leftover).
+/// `removeUnusedNS` runs before the sort passes: metadata + editor stripping
+/// is what leaves dead `xmlns:*` on the root (high-ROI leftover). `sortAttrs`
+/// / `sortDefsChildren` are last so gzip sees a stable final order.
 ///
 /// Structure passes that can hide motion hooks (`removeHiddenElems`,
 /// `collapseGroups`, unused-id defs) stay off here — `run_default` gates them.
@@ -50,11 +78,16 @@ pub fn run_strip(doc: &mut Document) {
     cleanup_attrs(doc);
     remove_empty_attrs(doc);
     remove_deprecated_attrs(doc);
+    remove_unknowns_and_defaults(doc);
     remove_useless_defs(doc, false);
+    remove_non_inheritable_group_attrs(doc);
+    cleanup_enable_background(doc);
     remove_desc(doc);
     remove_empty_text(doc);
     remove_empty_containers(doc);
     remove_unused_ns(doc);
+    sort_attrs(doc);
+    sort_defs_children(doc);
 }
 
 /// `removeDoctype` — drop the DTD. Safe for SVG clients (SVGO).
@@ -191,9 +224,8 @@ pub fn remove_unused_ns(doc: &mut Document) {
 ///
 /// Drops safe-deprecated presentation leftovers (`clip`, `kerning`,
 /// `color-profile`) and `enable-background` when the document has no
-/// `<filter>`. Root `version` is ignored by every modern SVG client — SVGO
-/// `removeUnknownsAndDefaults` drops it; we do the same without the rest of
-/// that plugin.
+/// `<filter>`. Root `version` is ignored by every modern SVG client — also
+/// dropped by [`remove_unknowns_and_defaults`].
 pub fn remove_deprecated_attrs(doc: &mut Document) {
     let has_filter = document_has_local_name(&doc.nodes, "filter");
     doc.walk_elements_mut(&mut |el| {
@@ -202,6 +234,31 @@ pub fn remove_deprecated_attrs(doc: &mut Document) {
         }
         el.retain_attrs(|name, value| keep_deprecated_attr(name, value, has_filter));
     });
+}
+
+/// `removeUnknownsAndDefaults` — default presentation attrs only.
+///
+/// Public [SVGO](https://svgo.dev/docs/plugins/removeUnknownsAndDefaults/)
+/// contract also has `unknownContent` / `unknownAttrs`. We leave those **off**:
+/// dropping unknown names can strip SVG2 / tool-specific bits. This pass
+/// removes presentation attributes that equal the inherited (or initial)
+/// [SVG 1.1](https://www.w3.org/TR/SVG11/propidx.html) value, including
+/// useless overrides (`fill-rule="nonzero"` when that is already the used
+/// value).
+///
+/// Policy diverge vs stock SVGO `keepRoleAttr: false`: **never** drop `role`
+/// (including `role="img"`), `viewBox`, `xmlns` / `xmlns:*`, `aria-*`,
+/// `data-*`, or `<title>`. Never deletes elements — SMIL
+/// `visibility="hidden"` frames stay. Attributes targeted by a SMIL child
+/// (or `href="#id"` animate) are left alone.
+pub fn remove_unknowns_and_defaults(doc: &mut Document) {
+    let has_stylesheet = document_has_local_name(&doc.nodes, "style");
+    let mut remote = HashMap::new();
+    collect_remote_smil_attr_targets(&doc.nodes, &mut remote);
+    let inherited = svg_initial_presentation();
+    for node in &mut doc.nodes {
+        walk_unknowns_and_defaults(node, &inherited, has_stylesheet, &remote);
+    }
 }
 
 /// `removeUselessDefs` — drop unreferenced paint servers / clip / filter / etc.
@@ -217,6 +274,42 @@ pub fn remove_useless_defs(doc: &mut Document, keep_unreferenced_ids: bool) {
     collect_iri_refs(&doc.nodes, &mut refs);
     for node in &mut doc.nodes {
         strip_useless_defs_in(node, &refs, keep_unreferenced_ids);
+    }
+}
+
+/// `removeNonInheritableGroupAttrs` — drop presentation attrs on `<g>` that
+/// neither inherit nor paint the group as a unit.
+///
+/// [SVGO](https://svgo.dev/docs/plugins/removeNonInheritableGroupAttrs/):
+/// "Removes non-inheritable presentation attributes from groups."
+/// [oxvg](https://docs.rs/oxvg_optimiser/latest/oxvg_optimiser/struct.RemoveNonInheritableGroupAttrs.html):
+/// "should never visually change the document".
+///
+/// Inherit column is [SVG 1.1](https://www.w3.org/TR/SVG11/propidx.html).
+/// `fill` / `stroke` / fonts stay (inheritable). `opacity` / `filter` /
+/// `mask` / `clip-path` / `display` stay (apply to the group). Dead-on-group
+/// primitives (`flood-color`, `stop-color`, `alignment-baseline`, …) go.
+/// Attributes only — not `style=""` or `<style>` sheets.
+pub fn remove_non_inheritable_group_attrs(doc: &mut Document) {
+    doc.walk_elements_mut(&mut |el| {
+        if !el.local_name().eq_ignore_ascii_case("g") {
+            return;
+        }
+        el.retain_attrs(|name, _| !is_dead_on_group_presentation(name));
+    });
+}
+
+/// `cleanupEnableBackground` — drop or shorten the deprecated filter attr.
+///
+/// [SVGO](https://svgo.dev/docs/plugins/cleanupEnableBackground/): attrs +
+/// inline `style` only (not `<style>` sheets). [oxvg](https://docs.rs/oxvg_optimiser/latest/oxvg_optimiser/struct.CleanupEnableBackground.html):
+/// drop when the document has no `<filter>`; drop on `<svg>` when `new 0 0 W H`
+/// matches the node's width/height; replace with `new` on `<mask>` /
+/// `<pattern>` in that same case.
+pub fn cleanup_enable_background(doc: &mut Document) {
+    let has_filter = document_has_local_name(&doc.nodes, "filter");
+    for node in &mut doc.nodes {
+        cleanup_enable_background_in(node, has_filter);
     }
 }
 
@@ -247,13 +340,87 @@ pub fn remove_hidden_elems(doc: &mut Document) {
     drop_hidden_elems(&mut doc.nodes, &refs);
 }
 
+/// `moveElemsAttrsToGroup` subset: hoist identical inheritable presentation
+/// attrs from **two or more** content children onto `<g>`.
+///
+/// [SVGO](https://svgo.dev/docs/plugins/moveElemsAttrsToGroup/): “Move an
+/// elements attributes to their enclosing group.”
+/// [oxvg](https://docs.rs/oxvg_optimiser/latest/oxvg_optimiser/struct.MoveElemsAttrsToGroup.html):
+/// “should never visually change the document”.
+///
+/// Conservative vs stock SVGO: no `transform` / `opacity` / `style` hoist
+/// (filter bbox + compositing). Skip groups with `filter` / `mask` /
+/// `clip-path` / `clip` (attr, `style=""`, or those children). Skip a group
+/// whose `id` is a motion hook (`keep_motion_ids`, SMIL `href` / `begin` /
+/// `end`). Attributes only — not `<style>` sheets.
+pub fn move_elems_attrs_to_group(doc: &mut Document, keep_motion_ids: bool) {
+    let mut motion = HashSet::new();
+    collect_motion_target_ids(&doc.nodes, &mut motion);
+    hoist_common_group_attrs(&mut doc.nodes, &motion, keep_motion_ids);
+}
+
+/// `moveGroupAttrsToElems` subset: copy a `<g transform>` onto transformable
+/// children (concat: group list, then the child’s), then drop it on the group.
+///
+/// [SVGO](https://svgo.dev/docs/plugins/moveGroupAttrsToElems/): “Move some
+/// group attributes to the contained elements.”
+/// [oxvg](https://docs.rs/oxvg_optimiser/latest/oxvg_optimiser/struct.MoveGroupAttrsToElems.html):
+/// “should never visually change the document”.
+///
+/// No matrix bake (that is `convertTransform`). Skip filter / mask / clip
+/// groups and motion-id groups. Skip when a SMIL child targets the group’s
+/// `transform` (`animateTransform` / `attributeName=transform` without
+/// `href`). Top-down so nested groups concat outer then inner.
+pub fn move_group_attrs_to_elems(doc: &mut Document, keep_motion_ids: bool) {
+    let mut motion = HashSet::new();
+    collect_motion_target_ids(&doc.nodes, &mut motion);
+    push_group_transforms(&mut doc.nodes, &motion, keep_motion_ids);
+}
+
 /// `collapseGroups` subset: unwrap `<g>` that has **no attributes**.
 ///
-/// No filter / mask / clip-path / transform movers — those need rasters.
-/// After `cleanupIds` drops unused ids, id-only country wrappers become
-/// attrless and flatten. Skipped on motion in `run_default`.
+/// Transform / fill movers run first (`moveGroupAttrsToElems` /
+/// `moveElemsAttrsToGroup`). After `cleanupIds` drops unused ids, id-only
+/// country wrappers become attrless and flatten. Skipped on motion in
+/// `run_default`.
 pub fn collapse_groups(doc: &mut Document) {
     collapse_attrless_groups(&mut doc.nodes);
+}
+
+/// Default [`sortAttrs`] `order` — public SVGO / oxvg contract.
+const SORT_ATTR_ORDER: &[&str] = &[
+    "id", "width", "height", "x", "x1", "x2", "y", "y1", "y2", "cx", "cy", "r", "fill", "stroke",
+    "marker", "d", "points",
+];
+
+/// `sortAttrs` — deterministic attribute order (gzip / brotli, not visual).
+///
+/// [SVGO](https://svgo.dev/docs/plugins/sortAttrs/): `xmlnsOrder: 'front'`
+/// (default) puts XML namespace declarations first. Then the `order` list.
+/// Keys not in that list sort alphabetically. `stroke-*` / `marker-*` follow
+/// their prefix key so related paint attrs stay adjacent.
+///
+/// Does not add, drop, or rewrite values.
+pub fn sort_attrs(doc: &mut Document) {
+    doc.walk_elements_mut(&mut |el| {
+        el.attrs.sort_by(|(a, _), (b, _)| cmp_attr_names(a, b));
+    });
+}
+
+/// `sortDefsChildren` — group `<defs>` children for compression.
+///
+/// [SVGO](https://svgo.dev/docs/plugins/sortDefsChildren/): frequency, then
+/// element-name length, then element name. Frequency is descending so the
+/// largest same-tag cohort leads. Same-name siblings tie-break on `id`.
+/// Comments / PIs stay ahead of elements, in source order.
+///
+/// Paint-neutral: SVG paint is by `id` / `url(#)`, not defs child order.
+pub fn sort_defs_children(doc: &mut Document) {
+    doc.walk_elements_mut(&mut |el| {
+        if el.local_name().eq_ignore_ascii_case("defs") {
+            sort_one_defs(el);
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +658,149 @@ fn document_has_local_name(nodes: &[Node], name: &str) -> bool {
     false
 }
 
+/// Presentation attrs that [SVG 1.1](https://www.w3.org/TR/SVG11/propidx.html)
+/// marks **not inheritable** and that apply only to text / gradient stops /
+/// filter primitives — never to a `<g>` as a painted unit.
+fn is_dead_on_group_presentation(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "alignment-baseline"
+            | "baseline-shift"
+            | "dominant-baseline"
+            | "flood-color"
+            | "flood-opacity"
+            | "lighting-color"
+            | "stop-color"
+            | "stop-opacity"
+            | "text-decoration"
+            | "unicode-bidi"
+    )
+}
+
+fn cleanup_enable_background_in(node: &mut Node, has_filter: bool) {
+    let Node::Element(el) = node else {
+        return;
+    };
+    for child in &mut el.children {
+        cleanup_enable_background_in(child, has_filter);
+    }
+    apply_enable_background(el, has_filter);
+}
+
+fn apply_enable_background(el: &mut Element, has_filter: bool) {
+    if let Some(raw) = el.attr("enable-background").map(str::to_string) {
+        match decide_enable_background(el, &raw, has_filter) {
+            EnableBgAction::Drop => {
+                el.remove_attr("enable-background");
+            }
+            EnableBgAction::Set(v) => {
+                if v != raw {
+                    el.set_attr("enable-background", v);
+                }
+            }
+            EnableBgAction::Keep => {}
+        }
+    }
+    if let Some(style) = el.attr("style").map(str::to_string) {
+        let rewritten = map_style_enable_background(el, &style, has_filter);
+        if rewritten.is_empty() {
+            el.remove_attr("style");
+        } else if rewritten != style {
+            el.set_attr("style", rewritten);
+        }
+    }
+}
+
+enum EnableBgAction {
+    Drop,
+    Keep,
+    Set(String),
+}
+
+fn decide_enable_background(el: &Element, raw: &str, has_filter: bool) -> EnableBgAction {
+    if !has_filter {
+        return EnableBgAction::Drop;
+    }
+    let parts: Vec<&str> = raw.split_whitespace().collect();
+    if parts.is_empty() {
+        return EnableBgAction::Drop;
+    }
+    if parts.len() == 1 && parts[0].eq_ignore_ascii_case("accumulate") {
+        return EnableBgAction::Drop;
+    }
+    if parts.len() == 5 && parts[0].eq_ignore_ascii_case("new") {
+        let w = parts[3];
+        let h = parts[4];
+        if dims_match_elem(el, w, h) {
+            let local = el.local_name();
+            if local.eq_ignore_ascii_case("svg") {
+                return EnableBgAction::Drop;
+            }
+            if local.eq_ignore_ascii_case("mask")
+                || local.eq_ignore_ascii_case("pattern")
+                || local.eq_ignore_ascii_case("filter")
+            {
+                return EnableBgAction::Set("new".into());
+            }
+        }
+    }
+    EnableBgAction::Keep
+}
+
+fn dims_match_elem(el: &Element, w: &str, h: &str) -> bool {
+    let Some(ew) = el.attr("width") else {
+        return false;
+    };
+    let Some(eh) = el.attr("height") else {
+        return false;
+    };
+    len_eq(ew, w) && len_eq(eh, h)
+}
+
+fn len_eq(a: &str, b: &str) -> bool {
+    normalize_len(a) == normalize_len(b)
+}
+
+fn normalize_len(raw: &str) -> String {
+    let folded = raw.trim().to_ascii_lowercase();
+    let t = folded.strip_suffix("px").unwrap_or(&folded).trim();
+    if let Ok(n) = t.parse::<f64>() {
+        if n.is_finite() && n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
+            return (n as i64).to_string();
+        }
+        if n.is_finite() {
+            return n.to_string();
+        }
+    }
+    t.to_string()
+}
+
+fn map_style_enable_background(el: &Element, style: &str, has_filter: bool) -> String {
+    let mut out = Vec::new();
+    for decl in style.split(';') {
+        let decl = decl.trim();
+        if decl.is_empty() {
+            continue;
+        }
+        let Some((k, v)) = decl.split_once(':') else {
+            out.push(decl.to_string());
+            continue;
+        };
+        let key = k.trim();
+        let val = v.trim();
+        if !key.eq_ignore_ascii_case("enable-background") {
+            out.push(format!("{key}:{val}"));
+            continue;
+        }
+        match decide_enable_background(el, val, has_filter) {
+            EnableBgAction::Drop => {}
+            EnableBgAction::Keep => out.push(format!("{key}:{val}")),
+            EnableBgAction::Set(new_v) => out.push(format!("{key}:{new_v}")),
+        }
+    }
+    out.join(";")
+}
+
 fn collect_iri_refs(nodes: &[Node], into: &mut HashSet<String>) {
     collect_hash_refs(nodes, into);
     for node in nodes {
@@ -646,7 +956,29 @@ fn is_hidden_droppable(node: &Node, refs: &HashSet<String>) -> bool {
     if subtree_has_referenced_id(el, refs) {
         return false;
     }
+    // Stock SVGO `removeHiddenElems` deletes SMIL `visibility="hidden"`
+    // frames. We never do — those are later revealed by `<set>` / `<animate>`.
+    if subtree_has_smil(el) {
+        return false;
+    }
     display_is_none(el) || visibility_is_hidden(el)
+}
+
+fn subtree_has_smil(el: &Element) -> bool {
+    if is_smil_tag(el.local_name()) {
+        return true;
+    }
+    el.children.iter().any(|n| match n {
+        Node::Element(c) => subtree_has_smil(c),
+        _ => false,
+    })
+}
+
+fn is_smil_tag(local: &str) -> bool {
+    matches!(
+        local.to_ascii_lowercase().as_str(),
+        "animate" | "animatetransform" | "animatemotion" | "animatecolor" | "set"
+    )
 }
 
 fn subtree_has_referenced_id(el: &Element, refs: &HashSet<String>) -> bool {
@@ -693,6 +1025,365 @@ fn style_decl_is(el: &Element, prop: &str, value: &str) -> bool {
     })
 }
 
+fn is_xmlns_decl(name: &str) -> bool {
+    name == "xmlns" || name.starts_with("xmlns:")
+}
+
+fn order_pos(name: &str) -> Option<usize> {
+    SORT_ATTR_ORDER.iter().position(|key| {
+        name == *key
+            || (name.len() > key.len()
+                && name.starts_with(key)
+                && name.as_bytes()[key.len()] == b'-')
+    })
+}
+
+fn attr_group_and_index(name: &str) -> (u8, usize) {
+    if is_xmlns_decl(name) {
+        let idx = if name == "xmlns" { 0 } else { 1 };
+        return (0, idx);
+    }
+    if let Some(i) = order_pos(name) {
+        return (1, i);
+    }
+    (2, 0)
+}
+
+fn cmp_attr_names(a: &str, b: &str) -> Ordering {
+    attr_group_and_index(a)
+        .cmp(&attr_group_and_index(b))
+        .then_with(|| a.cmp(b))
+}
+
+fn sort_one_defs(el: &mut Element) {
+    let mut freq: HashMap<String, usize> = HashMap::new();
+    for child in &el.children {
+        if let Node::Element(c) = child {
+            *freq.entry(c.name.clone()).or_insert(0) += 1;
+        }
+    }
+    el.children.sort_by(|a, b| match (a, b) {
+        (Node::Element(ae), Node::Element(be)) => {
+            let af = freq.get(&ae.name).copied().unwrap_or(0);
+            let bf = freq.get(&be.name).copied().unwrap_or(0);
+            bf.cmp(&af)
+                .then_with(|| ae.name.len().cmp(&be.name.len()))
+                .then_with(|| ae.name.cmp(&be.name))
+                .then_with(|| ae.attr("id").cmp(&be.attr("id")))
+        }
+        (Node::Element(_), _) => Ordering::Greater,
+        (_, Node::Element(_)) => Ordering::Less,
+        _ => Ordering::Equal,
+    });
+}
+
+fn hoist_common_group_attrs(nodes: &mut [Node], motion: &HashSet<String>, keep_motion_ids: bool) {
+    for node in nodes.iter_mut() {
+        let Node::Element(el) = node else {
+            continue;
+        };
+        hoist_common_group_attrs(&mut el.children, motion, keep_motion_ids);
+        if el.local_name().eq_ignore_ascii_case("g")
+            && !skip_group_movers(el, motion, keep_motion_ids, false)
+        {
+            hoist_into_group(el);
+        }
+    }
+}
+
+fn hoist_into_group(group: &mut Element) {
+    if group_has_raw_text(group) {
+        return;
+    }
+    let kids: Vec<usize> = group
+        .children
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| match n {
+            Node::Element(el) if is_group_content_child(el) => Some(i),
+            _ => None,
+        })
+        .collect();
+    if kids.len() < 2 {
+        return;
+    }
+    let Some(Node::Element(first)) = group.children.get(kids[0]) else {
+        return;
+    };
+    let candidates: Vec<(String, String)> = first
+        .attrs
+        .iter()
+        .filter(|(name, _)| is_hoistable_presentation(name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
+    for (name, value) in candidates {
+        if !every_content_child_has(group, &kids, &name, &value) {
+            continue;
+        }
+        if group.attr(&name).is_some_and(|existing| existing != value) {
+            continue;
+        }
+        if style_has_prop(group, &name) {
+            continue;
+        }
+        if kids.iter().any(|&i| match &group.children[i] {
+            Node::Element(el) => style_has_prop(el, &name) || child_smil_targets_attr(el, &name),
+            _ => false,
+        }) {
+            continue;
+        }
+        if group.attr(&name).is_none() {
+            group.set_attr(&name, value);
+        }
+        for &i in &kids {
+            if let Node::Element(el) = &mut group.children[i] {
+                el.remove_attr(&name);
+            }
+        }
+    }
+}
+
+fn every_content_child_has(group: &Element, kids: &[usize], name: &str, value: &str) -> bool {
+    kids.iter().all(|&i| match &group.children[i] {
+        Node::Element(el) => el.attr(name) == Some(value),
+        _ => false,
+    })
+}
+
+fn push_group_transforms(nodes: &mut [Node], motion: &HashSet<String>, keep_motion_ids: bool) {
+    for node in nodes.iter_mut() {
+        let Node::Element(el) = node else {
+            continue;
+        };
+        if el.local_name().eq_ignore_ascii_case("g")
+            && !skip_group_movers(el, motion, keep_motion_ids, true)
+        {
+            push_transform_to_children(el);
+        }
+        push_group_transforms(&mut el.children, motion, keep_motion_ids);
+    }
+}
+
+fn push_transform_to_children(group: &mut Element) {
+    let Some(group_tf) = group.attr("transform").map(str::to_string) else {
+        return;
+    };
+    if group_tf.trim().is_empty() {
+        return;
+    }
+    if style_has_prop(group, "transform") {
+        return;
+    }
+    if group_has_raw_text(group) {
+        return;
+    }
+    let mut idxs = Vec::new();
+    for (i, child) in group.children.iter().enumerate() {
+        let Node::Element(el) = child else {
+            continue;
+        };
+        if is_smil_tag(el.local_name()) || is_ignored_group_child(el.local_name()) {
+            continue;
+        }
+        if !is_transformable_elem(el.local_name()) || style_has_prop(el, "transform") {
+            return;
+        }
+        idxs.push(i);
+    }
+    if idxs.is_empty() {
+        return;
+    }
+    for i in idxs {
+        let Node::Element(child) = &mut group.children[i] else {
+            continue;
+        };
+        match child.attr("transform") {
+            Some(existing) if !existing.trim().is_empty() => {
+                child.set_attr("transform", format!("{group_tf} {existing}"));
+            }
+            _ => {
+                child.set_attr("transform", group_tf.clone());
+            }
+        }
+    }
+    group.remove_attr("transform");
+}
+
+fn skip_group_movers(
+    el: &Element,
+    motion: &HashSet<String>,
+    keep_motion_ids: bool,
+    moving_transform: bool,
+) -> bool {
+    if group_has_filter_mask_clip(el) {
+        return true;
+    }
+    if let Some(id) = el.attr("id") {
+        if keep_motion_ids || motion.contains(id) {
+            return true;
+        }
+    }
+    if moving_transform && group_has_transform_smil(el) {
+        return true;
+    }
+    false
+}
+
+fn group_has_filter_mask_clip(el: &Element) -> bool {
+    for name in ["filter", "mask", "clip-path", "clip"] {
+        if el.attr(name).is_some() || style_has_prop(el, name) {
+            return true;
+        }
+    }
+    el.children.iter().any(|n| match n {
+        Node::Element(c) => matches!(c.local_name(), "filter" | "mask" | "clipPath" | "clip-path"),
+        _ => false,
+    })
+}
+
+fn group_has_transform_smil(el: &Element) -> bool {
+    el.children.iter().any(|n| match n {
+        Node::Element(c) if is_smil_tag(c.local_name()) => {
+            let targets_self = c.attr("href").is_none() && c.attr("xlink:href").is_none();
+            if !targets_self {
+                return false;
+            }
+            c.local_name().eq_ignore_ascii_case("animatetransform")
+                || c.attr("attributeName")
+                    .is_some_and(|v| v.eq_ignore_ascii_case("transform"))
+        }
+        _ => false,
+    })
+}
+
+fn group_has_raw_text(el: &Element) -> bool {
+    el.children.iter().any(|n| match n {
+        Node::Text(t) => !t.chars().all(char::is_whitespace),
+        _ => false,
+    })
+}
+
+fn is_group_content_child(el: &Element) -> bool {
+    !is_smil_tag(el.local_name()) && !is_ignored_group_child(el.local_name())
+}
+
+fn is_ignored_group_child(local: &str) -> bool {
+    matches!(
+        local.to_ascii_lowercase().as_str(),
+        "title" | "desc" | "metadata" | "style" | "script"
+    )
+}
+
+fn is_hoistable_presentation(name: &str) -> bool {
+    matches!(
+        name,
+        "fill"
+            | "fill-opacity"
+            | "fill-rule"
+            | "stroke"
+            | "stroke-opacity"
+            | "stroke-width"
+            | "stroke-linecap"
+            | "stroke-linejoin"
+            | "stroke-miterlimit"
+            | "stroke-dasharray"
+            | "stroke-dashoffset"
+            | "color"
+            | "font-family"
+            | "font-size"
+            | "font-weight"
+            | "font-style"
+            | "font-variant"
+            | "letter-spacing"
+            | "word-spacing"
+            | "text-anchor"
+            | "visibility"
+            | "pointer-events"
+            | "paint-order"
+            | "clip-rule"
+            | "marker-start"
+            | "marker-mid"
+            | "marker-end"
+            | "shape-rendering"
+            | "color-interpolation"
+            | "color-rendering"
+            | "image-rendering"
+            | "text-rendering"
+    )
+}
+
+fn is_transformable_elem(local: &str) -> bool {
+    matches!(
+        local.to_ascii_lowercase().as_str(),
+        "a" | "circle"
+            | "ellipse"
+            | "foreignObject"
+            | "g"
+            | "image"
+            | "line"
+            | "path"
+            | "polygon"
+            | "polyline"
+            | "rect"
+            | "switch"
+            | "text"
+            | "textPath"
+            | "tspan"
+            | "use"
+    )
+}
+
+fn style_has_prop(el: &Element, prop: &str) -> bool {
+    let Some(style) = el.attr("style") else {
+        return false;
+    };
+    style.split(';').any(|decl| {
+        let Some((k, _)) = decl.split_once(':') else {
+            return false;
+        };
+        k.trim().eq_ignore_ascii_case(prop)
+    })
+}
+
+fn child_smil_targets_attr(el: &Element, attr: &str) -> bool {
+    el.children.iter().any(|n| match n {
+        Node::Element(c) if is_smil_tag(c.local_name()) => {
+            let targets_self = c.attr("href").is_none() && c.attr("xlink:href").is_none();
+            targets_self
+                && c.attr("attributeName")
+                    .is_some_and(|v| v.eq_ignore_ascii_case(attr))
+        }
+        _ => false,
+    })
+}
+
+fn collect_motion_target_ids(nodes: &[Node], into: &mut HashSet<String>) {
+    for node in nodes {
+        let Node::Element(el) = node else {
+            continue;
+        };
+        if is_smil_tag(el.local_name()) {
+            for key in ["href", "xlink:href"] {
+                if let Some(v) = el.attr(key) {
+                    if let Some(id) = v.strip_prefix('#') {
+                        if !id.is_empty() {
+                            into.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+            for key in ["begin", "end"] {
+                if let Some(v) = el.attr(key) {
+                    for r in parse_smil_clock_value(v) {
+                        into.insert(r.id);
+                    }
+                }
+            }
+        }
+        collect_motion_target_ids(&el.children, into);
+    }
+}
+
 fn collapse_attrless_groups(nodes: &mut Vec<Node>) {
     for node in nodes.iter_mut() {
         if let Node::Element(el) = node {
@@ -717,6 +1408,338 @@ fn collapse_attrless_groups(nodes: &mut Vec<Node>) {
         nodes.splice(i..i, el.children);
         i += n;
     }
+}
+
+// ---------------------------------------------------------------------------
+// removeUnknownsAndDefaults (default attrs only)
+// ---------------------------------------------------------------------------
+
+/// Inheritable presentation attrs we may drop when they match the parent.
+const INHERITABLE_DEFAULTS: &[&str] = &[
+    "fill-rule",
+    "clip-rule",
+    "fill-opacity",
+    "stroke-opacity",
+    "stroke-dasharray",
+    "stroke-dashoffset",
+    "stroke-linecap",
+    "stroke-linejoin",
+    "stroke-miterlimit",
+    "stroke-width",
+    "visibility",
+    "fill",
+    "stroke",
+    "font-weight",
+    "font-style",
+    "text-anchor",
+    "letter-spacing",
+    "word-spacing",
+    "color",
+    "marker",
+    "marker-start",
+    "marker-mid",
+    "marker-end",
+];
+
+/// Not inherited — compare to the SVG initial value only.
+const NON_INHERITABLE_DEFAULTS: &[&str] = &[
+    "opacity",
+    "display",
+    "stop-opacity",
+    "flood-opacity",
+    "clip-path",
+    "mask",
+    "filter",
+];
+
+fn svg_initial_presentation() -> HashMap<String, String> {
+    [
+        ("fill-rule", "nonzero"),
+        ("clip-rule", "nonzero"),
+        ("fill-opacity", "1"),
+        ("stroke-opacity", "1"),
+        ("stroke-dasharray", "none"),
+        ("stroke-dashoffset", "0"),
+        ("stroke-linecap", "butt"),
+        ("stroke-linejoin", "miter"),
+        ("stroke-miterlimit", "4"),
+        ("stroke-width", "1"),
+        ("visibility", "visible"),
+        ("fill", "black"),
+        ("stroke", "none"),
+        ("font-weight", "normal"),
+        ("font-style", "normal"),
+        ("text-anchor", "start"),
+        ("letter-spacing", "normal"),
+        ("word-spacing", "normal"),
+        ("color", "black"),
+        ("marker", "none"),
+        ("marker-start", "none"),
+        ("marker-mid", "none"),
+        ("marker-end", "none"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect()
+}
+
+fn walk_unknowns_and_defaults(
+    node: &mut Node,
+    inherited: &HashMap<String, String>,
+    has_stylesheet: bool,
+    remote: &HashMap<String, HashSet<String>>,
+) {
+    let Node::Element(el) = node else {
+        return;
+    };
+    if el.local_name().eq_ignore_ascii_case("foreignObject") {
+        return;
+    }
+    if is_smil_tag(el.local_name()) {
+        for child in &mut el.children {
+            walk_unknowns_and_defaults(child, inherited, has_stylesheet, remote);
+        }
+        return;
+    }
+
+    strip_default_presentation(el, inherited, has_stylesheet, remote);
+    let next = inherit_presentation(el, inherited);
+    for child in &mut el.children {
+        walk_unknowns_and_defaults(child, &next, has_stylesheet, remote);
+    }
+}
+
+fn strip_default_presentation(
+    el: &mut Element,
+    inherited: &HashMap<String, String>,
+    has_stylesheet: bool,
+    remote: &HashMap<String, HashSet<String>>,
+) {
+    let is_svg = el.local_name().eq_ignore_ascii_case("svg");
+    let mut locked = el
+        .attr("id")
+        .and_then(|id| remote.get(id))
+        .cloned()
+        .unwrap_or_default();
+    collect_local_smil_attr_targets(el, &mut locked);
+    el.retain_attrs(|name, value| {
+        keep_presentation_attr(name, value, is_svg, inherited, has_stylesheet, &locked)
+    });
+}
+
+fn collect_local_smil_attr_targets(el: &Element, into: &mut HashSet<String>) {
+    for child in &el.children {
+        let Node::Element(c) = child else {
+            continue;
+        };
+        if !is_smil_tag(c.local_name()) {
+            continue;
+        }
+        if c.attr("href").is_some() || c.attr("xlink:href").is_some() {
+            continue;
+        }
+        if let Some(name) = c.attr("attributeName") {
+            into.insert(name.trim().to_ascii_lowercase());
+        }
+    }
+}
+
+fn keep_presentation_attr(
+    name: &str,
+    value: &str,
+    is_svg: bool,
+    inherited: &HashMap<String, String>,
+    has_stylesheet: bool,
+    locked: &HashSet<String>,
+) -> bool {
+    if is_protected_default_attr(name) {
+        return true;
+    }
+    if is_svg && name.eq_ignore_ascii_case("version") {
+        return false;
+    }
+    let folded = name.to_ascii_lowercase();
+    if locked.contains(&folded) {
+        return true;
+    }
+    if NON_INHERITABLE_DEFAULTS
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case(name))
+    {
+        return !values_equivalent(&folded, value, initial_non_inheritable(&folded));
+    }
+    if INHERITABLE_DEFAULTS
+        .iter()
+        .any(|k| k.eq_ignore_ascii_case(name))
+    {
+        if has_stylesheet {
+            return true;
+        }
+        let Some(inh) = inherited.get(&folded) else {
+            return true;
+        };
+        return !values_equivalent(&folded, value, inh);
+    }
+    true
+}
+
+fn is_protected_default_attr(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    n == "role"
+        || n == "viewbox"
+        || n == "xmlns"
+        || n.starts_with("xmlns:")
+        || n == "title"
+        || n.starts_with("aria-")
+        || n.starts_with("data-")
+}
+
+fn initial_non_inheritable(name: &str) -> &'static str {
+    match name {
+        "opacity" | "stop-opacity" | "flood-opacity" => "1",
+        "display" => "inline",
+        "clip-path" | "mask" | "filter" => "none",
+        _ => "",
+    }
+}
+
+fn inherit_presentation(el: &Element, parent: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut next = parent.clone();
+    for key in INHERITABLE_DEFAULTS {
+        if let Some(v) = specified_presentation(el, key) {
+            next.insert((*key).to_string(), v);
+        }
+    }
+    next
+}
+
+fn specified_presentation(el: &Element, name: &str) -> Option<String> {
+    let raw = style_decl_value(el, name).or_else(|| el.attr(name).map(|s| s.trim().to_string()))?;
+    if raw.eq_ignore_ascii_case("inherit") {
+        return None;
+    }
+    Some(raw)
+}
+
+fn style_decl_value(el: &Element, prop: &str) -> Option<String> {
+    let style = el.attr("style")?;
+    let mut found = None;
+    for decl in style.split(';') {
+        let Some((k, v)) = decl.split_once(':') else {
+            continue;
+        };
+        if k.trim().eq_ignore_ascii_case(prop) {
+            let val = v.trim();
+            if !val.is_empty() {
+                found = Some(val.to_string());
+            }
+        }
+    }
+    found
+}
+
+fn collect_remote_smil_attr_targets(nodes: &[Node], into: &mut HashMap<String, HashSet<String>>) {
+    for node in nodes {
+        let Node::Element(el) = node else {
+            continue;
+        };
+        if is_smil_tag(el.local_name()) {
+            if let Some(attr) = el.attr("attributeName") {
+                for key in ["href", "xlink:href"] {
+                    if let Some(v) = el.attr(key) {
+                        if let Some(id) = v.strip_prefix('#') {
+                            if !id.is_empty() {
+                                into.entry(id.to_string())
+                                    .or_default()
+                                    .insert(attr.trim().to_ascii_lowercase());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        collect_remote_smil_attr_targets(&el.children, into);
+    }
+}
+
+fn values_equivalent(name: &str, a: &str, b: &str) -> bool {
+    let a = a.trim();
+    let b = b.trim();
+    if a.eq_ignore_ascii_case("inherit") {
+        return true;
+    }
+    match name {
+        "fill-opacity" | "stroke-opacity" | "stop-opacity" | "flood-opacity" | "opacity" => {
+            (is_one_num(a) && is_one_num(b)) || numeric_len_eq(a, b)
+        }
+        "stroke-dashoffset" | "letter-spacing" | "word-spacing" => spacing_eq(a, b),
+        "stroke-width" | "stroke-miterlimit" => numeric_len_eq(a, b),
+        "fill" | "color" => {
+            (is_default_black(a) && is_default_black(b)) || a.eq_ignore_ascii_case(b)
+        }
+        "stroke" | "clip-path" | "mask" | "filter" | "marker" | "marker-start" | "marker-mid"
+        | "marker-end" => (is_none_kw(a) && is_none_kw(b)) || a.eq_ignore_ascii_case(b),
+        "font-weight" => font_weight_eq(a, b),
+        "stroke-dasharray" => (is_none_kw(a) && is_none_kw(b)) || a.eq_ignore_ascii_case(b),
+        _ => a.eq_ignore_ascii_case(b),
+    }
+}
+
+fn is_default_black(s: &str) -> bool {
+    matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "black" | "#000" | "#000000" | "#000000ff" | "#000f"
+    )
+}
+
+fn is_none_kw(s: &str) -> bool {
+    s.trim().eq_ignore_ascii_case("none")
+}
+
+fn font_weight_eq(a: &str, b: &str) -> bool {
+    normalize_font_weight(a) == normalize_font_weight(b)
+}
+
+fn normalize_font_weight(s: &str) -> String {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "normal" | "400" => "400".into(),
+        "bold" | "700" => "700".into(),
+        other => other.to_string(),
+    }
+}
+
+fn spacing_eq(a: &str, b: &str) -> bool {
+    let na = a.eq_ignore_ascii_case("normal") || is_zero_num(a);
+    let nb = b.eq_ignore_ascii_case("normal") || is_zero_num(b);
+    (na && nb) || numeric_len_eq(a, b) || a.eq_ignore_ascii_case(b)
+}
+
+fn is_one_num(s: &str) -> bool {
+    let t = s.trim();
+    if let Some(p) = t.strip_suffix('%') {
+        return p
+            .parse::<f64>()
+            .ok()
+            .is_some_and(|n| (n - 100.0).abs() < 0.05);
+    }
+    parse_user_unit_opt(t).is_some_and(|n| (n - 1.0).abs() < 0.001)
+}
+
+fn is_zero_num(s: &str) -> bool {
+    parse_user_unit_opt(s).is_some_and(|n| n == 0.0)
+}
+
+fn numeric_len_eq(a: &str, b: &str) -> bool {
+    match (parse_user_unit_opt(a), parse_user_unit_opt(b)) {
+        (Some(x), Some(y)) => (x - y).abs() < 1e-6,
+        _ => a.eq_ignore_ascii_case(b),
+    }
+}
+
+fn parse_user_unit_opt(raw: &str) -> Option<f64> {
+    let folded = raw.trim().to_ascii_lowercase();
+    let t = folded.strip_suffix("px").unwrap_or(&folded).trim();
+    t.parse::<f64>().ok().filter(|n| n.is_finite())
 }
 
 #[cfg(test)]
@@ -1030,11 +2053,29 @@ mod tests {
                         ),
                         ("xmlns:rdf", "http://www.w3.org/1999/02/22-rdf-syntax-ns#"),
                         ("viewBox", "  0  0  10  10 "),
+                        ("enable-background", "new"),
                     ],
                     vec![
                         node("metadata", &[], vec![]),
                         node("g", &[("id", "unused"), ("class", "")], vec![]),
-                        node("circle", &[("cx", "1"), ("cy", "1"), ("r", "1")], vec![]),
+                        node(
+                            "g",
+                            &[
+                                ("fill", "#f00"),
+                                ("flood-color", "blue"),
+                                ("opacity", "0.5"),
+                            ],
+                            vec![node(
+                                "circle",
+                                &[
+                                    ("cx", "1"),
+                                    ("cy", "1"),
+                                    ("r", "1"),
+                                    ("fill-rule", "nonzero"),
+                                ],
+                                vec![],
+                            )],
+                        ),
                     ],
                 ),
             ],
@@ -1047,9 +2088,25 @@ mod tests {
         assert!(has_attr(svg, "xmlns"));
         assert!(!has_attr(svg, "xmlns:inkscape"));
         assert!(!has_attr(svg, "xmlns:rdf"));
+        assert!(!has_attr(svg, "enable-background"));
         assert!(!descendant_has_name(svg, "metadata"));
-        assert!(!descendant_has_name(svg, "g"));
         assert!(descendant_has_name(svg, "circle"));
+        let painted = svg.children.iter().find_map(|n| match n {
+            Node::Element(el) if el.local_name() == "g" => Some(el),
+            _ => None,
+        });
+        let painted = painted.expect("painted group kept");
+        assert_eq!(painted.attr("fill"), Some("#f00"));
+        assert_eq!(painted.attr("opacity"), Some("0.5"));
+        assert!(!has_attr(painted, "flood-color"));
+        let circle = painted.children.iter().find_map(|n| match n {
+            Node::Element(el) if el.local_name() == "circle" => Some(el),
+            _ => None,
+        });
+        assert!(
+            !has_attr(circle.expect("circle"), "fill-rule"),
+            "default fill-rule=nonzero drops in run_strip"
+        );
     }
 
     #[test]
@@ -1057,8 +2114,549 @@ mod tests {
         assert!(STRIP_PLUGIN_NAMES.contains(&"removeUnusedNS"));
         assert!(STRIP_PLUGIN_NAMES.contains(&"removeEditorsNSData"));
         assert!(STRIP_PLUGIN_NAMES.contains(&"removeUselessDefs"));
+        assert!(STRIP_PLUGIN_NAMES.contains(&"removeNonInheritableGroupAttrs"));
+        assert!(STRIP_PLUGIN_NAMES.contains(&"cleanupEnableBackground"));
+        assert!(STRIP_PLUGIN_NAMES.contains(&"removeDesc"));
         assert!(STRIP_PLUGIN_NAMES.contains(&"collapseGroups"));
+        assert!(STRIP_PLUGIN_NAMES.contains(&"moveElemsAttrsToGroup"));
+        assert!(STRIP_PLUGIN_NAMES.contains(&"moveGroupAttrsToElems"));
+        assert!(STRIP_PLUGIN_NAMES.contains(&"sortAttrs"));
+        assert!(STRIP_PLUGIN_NAMES.contains(&"sortDefsChildren"));
+        assert!(STRIP_PLUGIN_NAMES.contains(&"removeUnknownsAndDefaults"));
         assert_eq!(STRIP_PLUGIN_NAMES[0], "removeDoctype");
+        assert_eq!(*STRIP_PLUGIN_NAMES.last().unwrap(), "sortDefsChildren");
+    }
+
+    #[test]
+    fn remove_unknowns_drops_fill_rule_nonzero_keeps_evenodd() {
+        let mut doc = doc_svg(
+            &[
+                ("xmlns", "http://www.w3.org/2000/svg"),
+                ("viewBox", "0 0 10 10"),
+                ("role", "img"),
+            ],
+            vec![
+                node("title", &[], vec![Node::Text("Logo".into())]),
+                node(
+                    "path",
+                    &[
+                        ("d", "M0 0h10v10z"),
+                        ("fill-rule", "nonzero"),
+                        ("clip-rule", "nonzero"),
+                        ("opacity", "1"),
+                        ("stroke-linecap", "butt"),
+                    ],
+                    vec![],
+                ),
+                node(
+                    "path",
+                    &[("d", "M1 1h2v2z"), ("fill-rule", "evenodd")],
+                    vec![],
+                ),
+            ],
+        );
+        remove_unknowns_and_defaults(&mut doc);
+        let svg = root(&doc);
+        assert_eq!(svg.attr("role"), Some("img"));
+        assert_eq!(svg.attr("viewBox"), Some("0 0 10 10"));
+        assert_eq!(svg.attr("xmlns"), Some("http://www.w3.org/2000/svg"));
+        assert!(descendant_has_name(svg, "title"));
+        let paths: Vec<&Element> = svg
+            .children
+            .iter()
+            .filter_map(|n| match n {
+                Node::Element(el) if el.local_name() == "path" => Some(el),
+                _ => None,
+            })
+            .collect();
+        assert!(!has_attr(paths[0], "fill-rule"), "{:?}", paths[0].attrs);
+        assert!(!has_attr(paths[0], "clip-rule"));
+        assert!(!has_attr(paths[0], "opacity"));
+        assert!(!has_attr(paths[0], "stroke-linecap"));
+        assert_eq!(paths[1].attr("fill-rule"), Some("evenodd"));
+    }
+
+    #[test]
+    fn remove_unknowns_keeps_nonzero_override_of_parent_evenodd() {
+        let mut doc = doc_svg(
+            &[],
+            vec![node(
+                "g",
+                &[("fill-rule", "evenodd")],
+                vec![
+                    node("path", &[("d", "M0 0"), ("fill-rule", "nonzero")], vec![]),
+                    node("path", &[("d", "M1 1"), ("fill-rule", "evenodd")], vec![]),
+                ],
+            )],
+        );
+        remove_unknowns_and_defaults(&mut doc);
+        let g = match &root(&doc).children[0] {
+            Node::Element(el) => el,
+            _ => panic!("g"),
+        };
+        assert_eq!(g.attr("fill-rule"), Some("evenodd"));
+        let kids: Vec<&Element> = g
+            .children
+            .iter()
+            .filter_map(|n| match n {
+                Node::Element(el) => Some(el),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kids[0].attr("fill-rule"),
+            Some("nonzero"),
+            "override of inherited evenodd must stay"
+        );
+        assert!(
+            !has_attr(kids[1], "fill-rule"),
+            "useless evenodd override drops"
+        );
+    }
+
+    #[test]
+    fn remove_unknowns_never_drops_role_viewbox_title_xmlns() {
+        let mut doc = doc_svg(
+            &[
+                ("xmlns", "http://www.w3.org/2000/svg"),
+                ("xmlns:xlink", "http://www.w3.org/1999/xlink"),
+                ("viewBox", "0 0 24 24"),
+                ("role", "img"),
+                ("aria-hidden", "false"),
+                ("data-icon", "github"),
+                ("version", "1.1"),
+            ],
+            vec![node("title", &[], vec![Node::Text("GitHub".into())])],
+        );
+        remove_unknowns_and_defaults(&mut doc);
+        let svg = root(&doc);
+        assert_eq!(svg.attr("role"), Some("img"));
+        assert_eq!(svg.attr("viewBox"), Some("0 0 24 24"));
+        assert_eq!(svg.attr("xmlns"), Some("http://www.w3.org/2000/svg"));
+        assert_eq!(
+            svg.attr("xmlns:xlink"),
+            Some("http://www.w3.org/1999/xlink")
+        );
+        assert_eq!(svg.attr("aria-hidden"), Some("false"));
+        assert_eq!(svg.attr("data-icon"), Some("github"));
+        assert!(!has_attr(svg, "version"));
+        assert!(descendant_has_name(svg, "title"));
+    }
+
+    #[test]
+    fn remove_unknowns_leaves_smil_hidden_frames_and_targeted_defaults() {
+        let mut doc = doc_svg(
+            &[],
+            vec![
+                node(
+                    "g",
+                    &[("visibility", "hidden")],
+                    vec![node(
+                        "rect",
+                        &[
+                            ("id", "frameA"),
+                            ("visibility", "hidden"),
+                            ("fill-rule", "nonzero"),
+                            ("width", "10"),
+                            ("height", "10"),
+                        ],
+                        vec![node(
+                            "set",
+                            &[
+                                ("attributeName", "visibility"),
+                                ("to", "visible"),
+                                ("begin", "0s"),
+                            ],
+                            vec![],
+                        )],
+                    )],
+                ),
+                node(
+                    "g",
+                    &[("visibility", "visible")],
+                    vec![node(
+                        "rect",
+                        &[
+                            ("id", "frameB"),
+                            ("opacity", "1"),
+                            ("fill-rule", "nonzero"),
+                            ("width", "10"),
+                            ("height", "10"),
+                        ],
+                        vec![node(
+                            "animate",
+                            &[
+                                ("attributeName", "opacity"),
+                                ("values", "1;0"),
+                                ("dur", "1s"),
+                            ],
+                            vec![],
+                        )],
+                    )],
+                ),
+                node(
+                    "rect",
+                    &[("id", "remote"), ("fill-rule", "nonzero"), ("width", "1")],
+                    vec![],
+                ),
+                node(
+                    "set",
+                    &[
+                        ("href", "#remote"),
+                        ("attributeName", "fill-rule"),
+                        ("to", "evenodd"),
+                    ],
+                    vec![],
+                ),
+            ],
+        );
+        remove_unknowns_and_defaults(&mut doc);
+        let svg = root(&doc);
+        let frame_a = find_id(svg, "frameA").expect("frameA");
+        assert_eq!(
+            frame_a.attr("visibility"),
+            Some("hidden"),
+            "SMIL hidden frame stays hidden"
+        );
+        assert!(descendant_has_name(frame_a, "set"), "SMIL child must stay");
+        let hidden_g = svg.children.iter().find_map(|n| match n {
+            Node::Element(el)
+                if el.local_name() == "g" && el.attr("visibility") == Some("hidden") =>
+            {
+                Some(el)
+            }
+            _ => None,
+        });
+        assert!(hidden_g.is_some(), "hidden group is not a default — keep");
+        let visible_g = svg.children.iter().find_map(|n| match n {
+            Node::Element(el)
+                if el.local_name() == "g" && el.attr("visibility") == Some("visible") =>
+            {
+                Some(el)
+            }
+            _ => None,
+        });
+        assert!(
+            visible_g.is_none(),
+            "visibility=visible is the initial value and may drop"
+        );
+        let frame_b = find_id(svg, "frameB").expect("frameB");
+        assert_eq!(
+            frame_b.attr("opacity"),
+            Some("1"),
+            "SMIL-targeted opacity stays even when 1"
+        );
+        assert!(!has_attr(frame_b, "fill-rule"));
+        let remote = find_id(svg, "remote").expect("remote");
+        assert_eq!(
+            remote.attr("fill-rule"),
+            Some("nonzero"),
+            "href-targeted SMIL attr stays"
+        );
+    }
+
+    #[test]
+    fn remove_unknowns_skips_inheritable_when_stylesheet_present() {
+        let mut doc = doc_svg(
+            &[],
+            vec![
+                node(
+                    "style",
+                    &[],
+                    vec![Node::Text("path{fill-rule:evenodd}".into())],
+                ),
+                node(
+                    "path",
+                    &[("d", "M0 0"), ("fill-rule", "nonzero"), ("opacity", "1")],
+                    vec![],
+                ),
+            ],
+        );
+        remove_unknowns_and_defaults(&mut doc);
+        let path = match root(&doc).children.iter().find_map(|n| match n {
+            Node::Element(el) if el.local_name() == "path" => Some(el),
+            _ => None,
+        }) {
+            Some(el) => el,
+            None => panic!("path"),
+        };
+        assert_eq!(
+            path.attr("fill-rule"),
+            Some("nonzero"),
+            "stylesheet can make inherited evenodd — keep the override"
+        );
+        assert!(
+            !has_attr(path, "opacity"),
+            "non-inheritable opacity:1 still drops"
+        );
+    }
+
+    #[test]
+    fn remove_unknowns_does_not_delete_unknown_or_custom_attrs() {
+        let mut doc = doc_svg(
+            &[],
+            vec![node(
+                "path",
+                &[
+                    ("d", "M0 0"),
+                    ("foo", "bar"),
+                    ("inkscape:label", "Layer"),
+                    ("fill-rule", "nonzero"),
+                ],
+                vec![],
+            )],
+        );
+        remove_unknowns_and_defaults(&mut doc);
+        let path = match &root(&doc).children[0] {
+            Node::Element(el) => el,
+            _ => panic!("path"),
+        };
+        assert_eq!(path.attr("foo"), Some("bar"));
+        assert_eq!(path.attr("inkscape:label"), Some("Layer"));
+        assert!(!has_attr(path, "fill-rule"));
+    }
+
+    fn attr_names(el: &Element) -> Vec<&str> {
+        el.attrs.iter().map(|(k, _)| k.as_str()).collect()
+    }
+
+    #[test]
+    fn sort_attrs_xmlns_front_then_order_then_alpha() {
+        let mut doc = doc_svg(
+            &[
+                ("viewBox", "0 0 10 10"),
+                ("height", "10"),
+                ("xmlns:xlink", "http://www.w3.org/1999/xlink"),
+                ("width", "10"),
+                ("id", "root"),
+                ("xmlns", "http://www.w3.org/2000/svg"),
+                ("class", "icon"),
+            ],
+            vec![node(
+                "circle",
+                &[
+                    ("stroke-width", "2"),
+                    ("fill", "#f00"),
+                    ("r", "4"),
+                    ("opacity", "0.8"),
+                    ("cy", "5"),
+                    ("stroke", "#000"),
+                    ("cx", "5"),
+                    ("id", "dot"),
+                    ("marker-end", "url(#m)"),
+                ],
+                vec![],
+            )],
+        );
+        sort_attrs(&mut doc);
+        assert_eq!(
+            attr_names(root(&doc)),
+            [
+                "xmlns",
+                "xmlns:xlink",
+                "id",
+                "width",
+                "height",
+                "class",
+                "viewBox",
+            ]
+        );
+        let circle = match &root(&doc).children[0] {
+            Node::Element(el) => el,
+            _ => panic!("circle"),
+        };
+        assert_eq!(
+            attr_names(circle),
+            [
+                "id",
+                "cx",
+                "cy",
+                "r",
+                "fill",
+                "stroke",
+                "stroke-width",
+                "marker-end",
+                "opacity",
+            ]
+        );
+    }
+
+    #[test]
+    fn sort_attrs_source_order_does_not_matter() {
+        let mut a = doc_svg(
+            &[
+                ("viewBox", "0 0 1 1"),
+                ("xmlns", "http://www.w3.org/2000/svg"),
+            ],
+            vec![node(
+                "rect",
+                &[
+                    ("fill", "red"),
+                    ("height", "1"),
+                    ("width", "1"),
+                    ("x", "0"),
+                    ("y", "0"),
+                ],
+                vec![],
+            )],
+        );
+        let mut b = doc_svg(
+            &[
+                ("xmlns", "http://www.w3.org/2000/svg"),
+                ("viewBox", "0 0 1 1"),
+            ],
+            vec![node(
+                "rect",
+                &[
+                    ("y", "0"),
+                    ("x", "0"),
+                    ("width", "1"),
+                    ("height", "1"),
+                    ("fill", "red"),
+                ],
+                vec![],
+            )],
+        );
+        sort_attrs(&mut a);
+        sort_attrs(&mut b);
+        assert_eq!(attr_names(root(&a)), attr_names(root(&b)));
+        let ra = match &root(&a).children[0] {
+            Node::Element(el) => attr_names(el),
+            _ => panic!("rect a"),
+        };
+        let rb = match &root(&b).children[0] {
+            Node::Element(el) => attr_names(el),
+            _ => panic!("rect b"),
+        };
+        assert_eq!(ra, rb);
+        assert_eq!(ra, ["width", "height", "x", "y", "fill"]);
+    }
+
+    #[test]
+    fn sort_attrs_is_idempotent() {
+        let mut doc = doc_svg(
+            &[
+                ("class", "z"),
+                ("id", "a"),
+                ("xmlns", "http://www.w3.org/2000/svg"),
+            ],
+            vec![],
+        );
+        sort_attrs(&mut doc);
+        let once: Vec<String> = attr_names(root(&doc))
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        sort_attrs(&mut doc);
+        let twice: Vec<String> = attr_names(root(&doc))
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(once, twice);
+        assert_eq!(once, ["xmlns", "id", "class"]);
+    }
+
+    #[test]
+    fn sort_defs_children_frequency_then_len_then_name() {
+        let mut doc = doc_svg(
+            &[],
+            vec![node(
+                "defs",
+                &[],
+                vec![
+                    Node::Comment("! keep".into()),
+                    node("clipPath", &[("id", "c")], vec![]),
+                    node("linearGradient", &[("id", "g1")], vec![]),
+                    node("mask", &[("id", "m")], vec![]),
+                    node("linearGradient", &[("id", "g2")], vec![]),
+                    node("filter", &[("id", "f")], vec![]),
+                    node("linearGradient", &[("id", "g0")], vec![]),
+                ],
+            )],
+        );
+        sort_defs_children(&mut doc);
+        let defs = match &root(&doc).children[0] {
+            Node::Element(el) => el,
+            _ => panic!("defs"),
+        };
+        assert!(matches!(&defs.children[0], Node::Comment(c) if c == "! keep"));
+        assert_eq!(
+            names_under(defs),
+            [
+                "linearGradient",
+                "linearGradient",
+                "linearGradient",
+                "mask",
+                "filter",
+                "clipPath",
+            ]
+        );
+        let ids: Vec<_> = defs
+            .children
+            .iter()
+            .filter_map(|n| match n {
+                Node::Element(el) => el.attr("id"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, ["g0", "g1", "g2", "m", "f", "c"]);
+    }
+
+    #[test]
+    fn sort_defs_children_source_order_does_not_matter() {
+        let kids_a = vec![
+            node("mask", &[("id", "m")], vec![]),
+            node("clipPath", &[("id", "c")], vec![]),
+            node("linearGradient", &[("id", "g")], vec![]),
+        ];
+        let kids_b = vec![
+            node("linearGradient", &[("id", "g")], vec![]),
+            node("clipPath", &[("id", "c")], vec![]),
+            node("mask", &[("id", "m")], vec![]),
+        ];
+        let mut a = doc_svg(&[], vec![node("defs", &[], kids_a)]);
+        let mut b = doc_svg(&[], vec![node("defs", &[], kids_b)]);
+        sort_defs_children(&mut a);
+        sort_defs_children(&mut b);
+        let da = match &root(&a).children[0] {
+            Node::Element(el) => names_under(el),
+            _ => panic!("defs a"),
+        };
+        let db = match &root(&b).children[0] {
+            Node::Element(el) => names_under(el),
+            _ => panic!("defs b"),
+        };
+        assert_eq!(da, db);
+        // freq=1 each: shorter name first, then alpha — mask(4), filter would
+        // be 6; clipPath(8). mask < clipPath by length; linearGradient is 15.
+        assert_eq!(da, ["mask", "clipPath", "linearGradient"]);
+    }
+
+    #[test]
+    fn sort_defs_children_is_idempotent() {
+        let mut doc = doc_svg(
+            &[],
+            vec![node(
+                "defs",
+                &[],
+                vec![
+                    node("clipPath", &[("id", "c")], vec![]),
+                    node("mask", &[("id", "m")], vec![]),
+                ],
+            )],
+        );
+        sort_defs_children(&mut doc);
+        let once: Vec<String> = match &root(&doc).children[0] {
+            Node::Element(el) => names_under(el).into_iter().map(str::to_string).collect(),
+            _ => panic!("defs"),
+        };
+        sort_defs_children(&mut doc);
+        let twice: Vec<String> = match &root(&doc).children[0] {
+            Node::Element(el) => names_under(el).into_iter().map(str::to_string).collect(),
+            _ => panic!("defs"),
+        };
+        assert_eq!(once, twice);
+        assert_eq!(once, ["mask", "clipPath"]);
     }
 
     #[test]
@@ -1216,6 +2814,574 @@ mod tests {
             })
             .collect();
         assert_eq!(texts, ["A real map legend for screen readers"]);
+    }
+
+    #[test]
+    fn remove_non_inheritable_group_attrs_drops_dead_keeps_paint() {
+        let mut doc = doc_svg(
+            &[],
+            vec![
+                node(
+                    "g",
+                    &[
+                        ("id", "layer"),
+                        ("class", "land"),
+                        ("fill", "#0a0"),
+                        ("stroke", "red"),
+                        ("opacity", "0.8"),
+                        ("filter", "url(#glow)"),
+                        ("mask", "url(#m)"),
+                        ("clip-path", "url(#c)"),
+                        ("display", "inline"),
+                        ("flood-color", "lime"),
+                        ("flood-opacity", "0.2"),
+                        ("lighting-color", "white"),
+                        ("stop-color", "black"),
+                        ("stop-opacity", "1"),
+                        ("alignment-baseline", "middle"),
+                        ("baseline-shift", "10"),
+                        ("dominant-baseline", "central"),
+                        ("text-decoration", "underline"),
+                        ("unicode-bidi", "embed"),
+                    ],
+                    vec![node("path", &[("d", "M0 0")], vec![])],
+                ),
+                node(
+                    "rect",
+                    &[("flood-color", "pink"), ("width", "2"), ("height", "2")],
+                    vec![],
+                ),
+            ],
+        );
+        remove_non_inheritable_group_attrs(&mut doc);
+        let svg = root(&doc);
+        let g = svg.children.iter().find_map(|n| match n {
+            Node::Element(el) if el.local_name() == "g" => Some(el),
+            _ => None,
+        });
+        let g = g.expect("group");
+        assert_eq!(g.attr("id"), Some("layer"));
+        assert_eq!(g.attr("class"), Some("land"));
+        assert_eq!(g.attr("fill"), Some("#0a0"));
+        assert_eq!(g.attr("stroke"), Some("red"));
+        assert_eq!(g.attr("opacity"), Some("0.8"));
+        assert_eq!(g.attr("filter"), Some("url(#glow)"));
+        assert_eq!(g.attr("mask"), Some("url(#m)"));
+        assert_eq!(g.attr("clip-path"), Some("url(#c)"));
+        assert_eq!(g.attr("display"), Some("inline"));
+        for dead in [
+            "flood-color",
+            "flood-opacity",
+            "lighting-color",
+            "stop-color",
+            "stop-opacity",
+            "alignment-baseline",
+            "baseline-shift",
+            "dominant-baseline",
+            "text-decoration",
+            "unicode-bidi",
+        ] {
+            assert!(!has_attr(g, dead), "{dead} should leave the group");
+        }
+        let rect = svg.children.iter().find_map(|n| match n {
+            Node::Element(el) if el.local_name() == "rect" => Some(el),
+            _ => None,
+        });
+        let rect = rect.expect("rect");
+        assert_eq!(
+            rect.attr("flood-color"),
+            Some("pink"),
+            "non-group presentation stays"
+        );
+    }
+
+    #[test]
+    fn cleanup_enable_background_drops_without_filter() {
+        let mut doc = doc_svg(
+            &[
+                ("width", "24"),
+                ("height", "24"),
+                ("enable-background", "new 0 0 24 24"),
+            ],
+            vec![node(
+                "g",
+                &[("style", "opacity:0.5;enable-background:new")],
+                vec![node("circle", &[("r", "2")], vec![])],
+            )],
+        );
+        cleanup_enable_background(&mut doc);
+        let svg = root(&doc);
+        assert!(!has_attr(svg, "enable-background"));
+        let g = match &svg.children[0] {
+            Node::Element(el) => el,
+            _ => panic!("g"),
+        };
+        assert_eq!(g.attr("style"), Some("opacity:0.5"));
+        assert!(!has_attr(g, "enable-background"));
+    }
+
+    #[test]
+    fn cleanup_enable_background_shortens_mask_when_filter_exists() {
+        let mut doc = doc_svg(
+            &[
+                ("width", "100"),
+                ("height", "50"),
+                ("enable-background", "new 0 0 100 50"),
+            ],
+            vec![
+                node("filter", &[("id", "blur")], vec![]),
+                node(
+                    "mask",
+                    &[
+                        ("id", "m"),
+                        ("width", "10px"),
+                        ("height", "10"),
+                        ("enable-background", "new 0 0 10 10"),
+                    ],
+                    vec![],
+                ),
+                node(
+                    "pattern",
+                    &[
+                        ("id", "p"),
+                        ("width", "8"),
+                        ("height", "8"),
+                        ("style", "enable-background:new 0 0 8 8"),
+                    ],
+                    vec![],
+                ),
+                node(
+                    "g",
+                    &[("enable-background", "new 0 0 99 99")],
+                    vec![node("rect", &[("width", "1")], vec![])],
+                ),
+            ],
+        );
+        cleanup_enable_background(&mut doc);
+        let svg = root(&doc);
+        assert!(
+            !has_attr(svg, "enable-background"),
+            "svg canvas-sized value drops"
+        );
+        let mask = find_id(svg, "m").expect("mask");
+        assert_eq!(mask.attr("enable-background"), Some("new"));
+        let pattern = find_id(svg, "p").expect("pattern");
+        assert_eq!(pattern.attr("style"), Some("enable-background:new"));
+        let g = svg.children.iter().find_map(|n| match n {
+            Node::Element(el) if el.local_name() == "g" => Some(el),
+            _ => None,
+        });
+        assert_eq!(
+            g.expect("g").attr("enable-background"),
+            Some("new 0 0 99 99"),
+            "unmatched leftover stays when a filter exists"
+        );
+    }
+
+    #[test]
+    fn remove_hidden_keeps_smil_visibility_frames() {
+        let mut doc = doc_svg(
+            &[],
+            vec![
+                node(
+                    "rect",
+                    &[
+                        ("id", "frameA"),
+                        ("visibility", "hidden"),
+                        ("width", "10"),
+                        ("height", "10"),
+                    ],
+                    vec![node(
+                        "set",
+                        &[
+                            ("attributeName", "visibility"),
+                            ("to", "visible"),
+                            ("begin", "0s"),
+                            ("dur", "1s"),
+                        ],
+                        vec![],
+                    )],
+                ),
+                node(
+                    "rect",
+                    &[
+                        ("id", "frameB"),
+                        ("visibility", "hidden"),
+                        ("width", "10"),
+                        ("height", "10"),
+                    ],
+                    vec![node(
+                        "animate",
+                        &[
+                            ("attributeName", "visibility"),
+                            ("values", "hidden;visible"),
+                            ("dur", "1s"),
+                        ],
+                        vec![],
+                    )],
+                ),
+                node(
+                    "g",
+                    &[("display", "none")],
+                    vec![node("circle", &[("r", "1")], vec![])],
+                ),
+            ],
+        );
+        remove_hidden_elems(&mut doc);
+        let svg = root(&doc);
+        assert!(find_id(svg, "frameA").is_some(), "SMIL hidden frame A");
+        assert!(find_id(svg, "frameB").is_some(), "SMIL hidden frame B");
+        assert!(
+            descendant_has_name(svg, "set") && descendant_has_name(svg, "animate"),
+            "SMIL children stay"
+        );
+        assert!(
+            !svg.children.iter().any(|n| match n {
+                Node::Element(el) => {
+                    el.local_name() == "g" && el.attr("display") == Some("none")
+                }
+                _ => false,
+            }),
+            "plain display:none junk still drops"
+        );
+    }
+
+    fn first_g(el: &Element) -> &Element {
+        el.children
+            .iter()
+            .find_map(|n| match n {
+                Node::Element(child) if child.local_name() == "g" => Some(child),
+                _ => None,
+            })
+            .expect("group")
+    }
+
+    #[test]
+    fn move_elems_hoists_shared_fill_and_stroke() {
+        let mut doc = doc_svg(
+            &[],
+            vec![node(
+                "g",
+                &[],
+                vec![
+                    node(
+                        "path",
+                        &[("d", "M0 0"), ("fill", "#f00"), ("stroke", "#00f")],
+                        vec![],
+                    ),
+                    node(
+                        "circle",
+                        &[("r", "2"), ("fill", "#f00"), ("stroke", "#00f")],
+                        vec![],
+                    ),
+                ],
+            )],
+        );
+        move_elems_attrs_to_group(&mut doc, false);
+        let g = first_g(root(&doc));
+        assert_eq!(g.attr("fill"), Some("#f00"));
+        assert_eq!(g.attr("stroke"), Some("#00f"));
+        for child in &g.children {
+            let Node::Element(el) = child else {
+                continue;
+            };
+            assert!(!has_attr(el, "fill"), "{}", el.name);
+            assert!(!has_attr(el, "stroke"), "{}", el.name);
+        }
+    }
+
+    #[test]
+    fn move_elems_skips_mixed_fill_and_single_child() {
+        let mut mixed = doc_svg(
+            &[],
+            vec![node(
+                "g",
+                &[],
+                vec![
+                    node("path", &[("d", "M0 0"), ("fill", "#f00")], vec![]),
+                    node("circle", &[("r", "2"), ("fill", "#0f0")], vec![]),
+                ],
+            )],
+        );
+        move_elems_attrs_to_group(&mut mixed, false);
+        let g = first_g(root(&mixed));
+        assert!(!has_attr(g, "fill"));
+        assert_eq!(
+            g.children
+                .iter()
+                .filter_map(|n| match n {
+                    Node::Element(el) => el.attr("fill"),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            ["#f00", "#0f0"]
+        );
+
+        let mut one = doc_svg(
+            &[],
+            vec![node(
+                "g",
+                &[],
+                vec![node("circle", &[("r", "2"), ("fill", "#f00")], vec![])],
+            )],
+        );
+        move_elems_attrs_to_group(&mut one, false);
+        let g = first_g(root(&one));
+        assert!(!has_attr(g, "fill"));
+        assert_eq!(
+            match &g.children[0] {
+                Node::Element(el) => el.attr("fill"),
+                _ => None,
+            },
+            Some("#f00")
+        );
+    }
+
+    #[test]
+    fn move_elems_skips_filter_mask_clip_and_style() {
+        for (attr, value) in [
+            ("filter", "url(#blur)"),
+            ("mask", "url(#m)"),
+            ("clip-path", "url(#c)"),
+            ("clip", "rect(0 0 1 1)"),
+        ] {
+            let mut doc = doc_svg(
+                &[],
+                vec![node(
+                    "g",
+                    &[(attr, value)],
+                    vec![
+                        node("path", &[("d", "M0 0"), ("fill", "#f00")], vec![]),
+                        node("circle", &[("r", "1"), ("fill", "#f00")], vec![]),
+                    ],
+                )],
+            );
+            move_elems_attrs_to_group(&mut doc, false);
+            let g = first_g(root(&doc));
+            assert!(!has_attr(g, "fill"), "{attr} group must not hoist");
+            assert_eq!(g.attr(attr), Some(value));
+        }
+
+        let mut styled = doc_svg(
+            &[],
+            vec![node(
+                "g",
+                &[("style", "filter:url(#blur)")],
+                vec![
+                    node("path", &[("d", "M0 0"), ("fill", "#f00")], vec![]),
+                    node("circle", &[("r", "1"), ("fill", "#f00")], vec![]),
+                ],
+            )],
+        );
+        move_elems_attrs_to_group(&mut styled, false);
+        assert!(!has_attr(first_g(root(&styled)), "fill"));
+    }
+
+    #[test]
+    fn move_elems_skips_motion_ids_and_does_not_hoist_transform() {
+        let mut motion = doc_svg(
+            &[],
+            vec![
+                node(
+                    "g",
+                    &[("id", "layer")],
+                    vec![
+                        node("path", &[("d", "M0 0"), ("fill", "#f00")], vec![]),
+                        node("circle", &[("r", "1"), ("fill", "#f00")], vec![]),
+                    ],
+                ),
+                node(
+                    "g",
+                    &[("id", "hook")],
+                    vec![
+                        node("path", &[("d", "M1 1"), ("fill", "#0f0")], vec![]),
+                        node("circle", &[("r", "2"), ("fill", "#0f0")], vec![]),
+                    ],
+                ),
+                node(
+                    "animate",
+                    &[("href", "#hook"), ("attributeName", "opacity")],
+                    vec![],
+                ),
+                node(
+                    "g",
+                    &[("id", "sync")],
+                    vec![
+                        node("path", &[("d", "M2 2"), ("fill", "#00f")], vec![]),
+                        node("circle", &[("r", "3"), ("fill", "#00f")], vec![]),
+                    ],
+                ),
+                node("animate", &[("begin", "sync.end+0.2s")], vec![]),
+            ],
+        );
+        move_elems_attrs_to_group(&mut motion, true);
+        let svg = root(&motion);
+        assert!(
+            !has_attr(find_id(svg, "layer").expect("layer"), "fill"),
+            "keep_motion_ids skips every id'd group"
+        );
+        assert!(!has_attr(find_id(svg, "hook").expect("hook"), "fill"));
+        assert!(!has_attr(find_id(svg, "sync").expect("sync"), "fill"));
+
+        let mut static_doc = doc_svg(
+            &[],
+            vec![node(
+                "g",
+                &[("id", "plain")],
+                vec![
+                    node("path", &[("d", "M0 0"), ("fill", "#f00")], vec![]),
+                    node("circle", &[("r", "1"), ("fill", "#f00")], vec![]),
+                ],
+            )],
+        );
+        move_elems_attrs_to_group(&mut static_doc, false);
+        assert_eq!(
+            find_id(root(&static_doc), "plain")
+                .expect("plain")
+                .attr("fill"),
+            Some("#f00"),
+            "static unused id may hoist"
+        );
+
+        let mut tf = doc_svg(
+            &[],
+            vec![node(
+                "g",
+                &[],
+                vec![
+                    node(
+                        "path",
+                        &[("d", "M0 0"), ("transform", "scale(2)"), ("opacity", "0.5")],
+                        vec![],
+                    ),
+                    node(
+                        "circle",
+                        &[("r", "1"), ("transform", "scale(2)"), ("opacity", "0.5")],
+                        vec![],
+                    ),
+                ],
+            )],
+        );
+        move_elems_attrs_to_group(&mut tf, false);
+        let g = first_g(root(&tf));
+        assert!(!has_attr(g, "transform"));
+        assert!(!has_attr(g, "opacity"));
+    }
+
+    #[test]
+    fn move_group_pushes_transform_and_concats() {
+        let mut doc = doc_svg(
+            &[],
+            vec![node(
+                "g",
+                &[("transform", "translate(1 2)")],
+                vec![
+                    node("circle", &[("r", "2")], vec![]),
+                    node("path", &[("d", "M0 0"), ("transform", "scale(2)")], vec![]),
+                ],
+            )],
+        );
+        move_group_attrs_to_elems(&mut doc, false);
+        let g = first_g(root(&doc));
+        assert!(!has_attr(g, "transform"));
+        let kids: Vec<&Element> = g
+            .children
+            .iter()
+            .filter_map(|n| match n {
+                Node::Element(el) => Some(el),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kids[0].attr("transform"), Some("translate(1 2)"));
+        assert_eq!(kids[1].attr("transform"), Some("translate(1 2) scale(2)"));
+    }
+
+    #[test]
+    fn move_group_skips_filter_mask_clip_and_motion() {
+        let mut filtered = doc_svg(
+            &[],
+            vec![node(
+                "g",
+                &[("transform", "translate(1 2)"), ("filter", "url(#blur)")],
+                vec![node("circle", &[("r", "2")], vec![])],
+            )],
+        );
+        move_group_attrs_to_elems(&mut filtered, false);
+        let g = first_g(root(&filtered));
+        assert_eq!(g.attr("transform"), Some("translate(1 2)"));
+        assert!(!has_attr(
+            match &g.children[0] {
+                Node::Element(el) => el,
+                _ => panic!("circle"),
+            },
+            "transform"
+        ));
+
+        let mut motion = doc_svg(
+            &[],
+            vec![node(
+                "g",
+                &[("id", "spin"), ("transform", "rotate(10)")],
+                vec![node("circle", &[("r", "2")], vec![])],
+            )],
+        );
+        move_group_attrs_to_elems(&mut motion, true);
+        assert_eq!(
+            find_id(root(&motion), "spin")
+                .expect("spin")
+                .attr("transform"),
+            Some("rotate(10)")
+        );
+
+        let mut smil = doc_svg(
+            &[],
+            vec![node(
+                "g",
+                &[("transform", "translate(3 4)")],
+                vec![
+                    node("circle", &[("r", "2")], vec![]),
+                    node(
+                        "animateTransform",
+                        &[
+                            ("attributeName", "transform"),
+                            ("type", "rotate"),
+                            ("dur", "1s"),
+                        ],
+                        vec![],
+                    ),
+                ],
+            )],
+        );
+        move_group_attrs_to_elems(&mut smil, false);
+        assert_eq!(
+            first_g(root(&smil)).attr("transform"),
+            Some("translate(3 4)"),
+            "SMIL transform on the group stays put"
+        );
+    }
+
+    #[test]
+    fn movers_then_collapse_unwraps_translated_group() {
+        let mut doc = doc_svg(
+            &[],
+            vec![node(
+                "g",
+                &[("transform", "translate(1 2)")],
+                vec![node("circle", &[("r", "3"), ("fill", "#0a0")], vec![])],
+            )],
+        );
+        move_elems_attrs_to_group(&mut doc, false);
+        move_group_attrs_to_elems(&mut doc, false);
+        collapse_groups(&mut doc);
+        let svg = root(&doc);
+        assert!(!names_under(svg).contains(&"g"));
+        let circle = match &svg.children[0] {
+            Node::Element(el) => el,
+            _ => panic!("circle"),
+        };
+        assert_eq!(circle.local_name(), "circle");
+        assert_eq!(circle.attr("transform"), Some("translate(1 2)"));
+        assert_eq!(circle.attr("fill"), Some("#0a0"));
     }
 
     fn find_id<'a>(el: &'a Element, id: &str) -> Option<&'a Element> {

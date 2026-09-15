@@ -3,12 +3,12 @@ name = "minsvg"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "Clean-room Rust SVG optimizer (animation-aware by default)"
+description = "Clean-room Rust SVG optimizer with an SVGO-shaped CLI. Animation-aware minify; not full SVGO parity."
 repository = "https://github.com/Gromsi/minSVG"
 homepage = "https://github.com/Gromsi/minSVG"
 readme = "README.md"
-keywords = ["svg", "optimizer", "cli"]
-categories = ["command-line-utilities", "compression"]
+keywords = ["svgo", "svg", "optimizer", "minify", "rust"]
+categories = ["command-line-utilities", "compression", "graphics"]
 rust-version = "1.83"
 include = [
     "src/*.rs",
@@ -28,33 +28,55 @@ path = "src/lib.rs"
 name = "minsvg"
 path = "src/main.rs"
 
+# Separate bin (not linked into `minsvg`) so the default CLI stays lean.
+[[bin]]
+name = "minsvg-mcp"
+path = "src/mcp_stdio.rs"
+required-features = ["mcp"]
+
 [features]
+# Default `minsvg` is optimizer-only. `serve` / `mcp` stay optional so
+# `cargo +1.83.0 build --release --bin minsvg` does not link HTTP or MCP
+# (no axum; tiny_http is `dep:`-gated; `minsvg-mcp` is a separate bin).
 default = []
-# Lean HTTP (tiny_http + serde_json). Not axum/tokio — those would bloat the default CLI.
+# Lean HTTP (tiny_http + serde_json). Not axum/tokio.
 #   cargo install --git https://github.com/Gromsi/minSVG --locked --features serve
-serve = ["dep:tiny_http", "dep:serde_json"]
+serve = ["dep:tiny_http"]
+# Cursor MCP stdio (`minsvg-mcp`). Not linked into `minsvg`.
+#   cargo install --git https://github.com/Gromsi/minSVG --locked --features mcp
+mcp = []
 
 [dependencies]
 clap = { version = "=4.5.32", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 thiserror = "2"
-quick-xml = "0.37"
-base64 = "0.22"
+quick-xml = { version = "0.37", default-features = false }
+base64 = { version = "0.22", default-features = false, features = ["alloc", "std"] }
 image = { version = "=0.25.5", default-features = false, features = ["png", "jpeg", "webp"] }
-oxipng = { version = "=9.1.5", default-features = false, features = ["parallel"] }
-# Unused in source — rustc 1.83 pin (indexmap 2.12+ is edition 2024).
-indexmap = { version = "=2.11.4", default-features = false }
+# Single-thread PNG (no rayon). Lockfile pins indexmap 2.11.4 for rustc 1.83
+# (2.12+ is edition 2024). Do not re-add a dummy unused indexmap dep.
+oxipng = { version = "=9.1.5", default-features = false }
 tiny_http = { version = "=0.12.0", optional = true }
-serde_json = { version = "=1.0.134", optional = true }
+serde = { version = "=1.0.229", default-features = false, features = ["std", "derive"] }
+# Plugin `--param` JSON + config. Do not add serde_yaml (YAML subset is hand-rolled).
+serde_json = { version = "=1.0.134", default-features = false, features = ["std"] }
+toml = { version = "=0.8.19", default-features = false, features = ["parse"] }
+
+[dev-dependencies]
+tempfile = "=3.14.0"
 
 [[test]]
 name = "serve_http"
 path = "tests/serve_http.rs"
 required-features = ["serve"]
 
-[package.metadata.cargo-udeps.ignore]
-normal = ["indexmap"]
+[[test]]
+name = "mcp_stdio"
+path = "tests/mcp_stdio.rs"
+required-features = ["mcp"]
 
-# rustc 1.83-safe size profile (fat LTO + single CGU + strip).
+# Size-first CLI release (MSRV 1.83). Fat LTO + one CGU + strip.
+# panic=abort is safe: this is a CLI (no catch_unwind / FFI unwind tables).
+# Default `minsvg` stays lean — MCP (`minsvg-mcp`) and `serve` stay feature-gated.
 [profile.release]
 lto = true
 codegen-units = 1

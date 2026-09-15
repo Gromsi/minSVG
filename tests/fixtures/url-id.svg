@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <linearGradient id="poolFill">
+      <stop offset="0" stop-color="#ffbbaa"/>
+    </linearGradient>
+    <linearGradient id="waterShine">
+      <stop offset="1" stop-color="#ffffff"/>
+    </linearGradient>
+    <clipPath id="ClipMe">
+      <rect width="16" height="16"/>
+    </clipPath>
+  </defs>
+  <ellipse
+    fill="url(#poolFill)"
+    stroke="url(#waterShine)"
+    clip-path="url(#ClipMe)"
+    cx="8" cy="8" rx="6" ry="4"/>
+</svg>

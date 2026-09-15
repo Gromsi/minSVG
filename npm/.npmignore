@@ -1,0 +1,33 @@
+# Published allow-list is package.json "files". This deny-list is the
+# safety net if that field is dropped or extra files land in npm/.
+# The Rust minsvg binary is optional and is never part of this tarball.
+
+# JS-only checks (not runtime)
+test.mjs
+pack-check.mjs
+
+# Rust crate / build (must never ship)
+target/
+**/target/
+src/
+tests/
+**/*.rs
+Cargo.toml
+Cargo.lock
+
+# Fixtures / corpus / screenshots
+fixtures/
+**/fixtures/
+**/*.svg
+**/*.png
+**/*.webp
+output/
+corpus/
+
+# Native bins (install separately: cargo install --git … --locked)
+minsvg
+minsvg.exe
+*.crate
+*.tgz
+*.node
+*.wasm

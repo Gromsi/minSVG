@@ -2,16 +2,20 @@
 //!
 //! Conservative defaults: unused-only `cleanupIds` (keep `url(#Id)` case),
 //! non-zero CSS `px` stays, no `currentColor`, no unused-selector deletion.
+//! `minifyStyles` also runs a cascade-safe `convertStyleToAttrs` (no `<style>`,
+//! no `class`) so inline presentation decls become attributes.
 
 use crate::ast::{Document, Element, Node};
 use std::collections::HashSet;
 
 /// SVGO `cleanupNumericValues` default. Applied to presentation attrs only —
 /// never to path `d` (that is convertPathData / a sibling).
-const NON_PATH_FLOAT_PRECISION: i32 = 3;
+pub const DEFAULT_NUMERIC_PRECISION: u8 = 3;
+const NON_PATH_FLOAT_PRECISION: i32 = DEFAULT_NUMERIC_PRECISION as i32;
 
 /// Run the minify plugins in pipeline order.
 pub fn run_minify(doc: &mut Document) {
+    merge_styles(doc);
     minify_styles(doc);
     convert_colors(doc);
     minify_styles(doc);
@@ -30,11 +34,15 @@ pub fn run_minify(doc: &mut Document) {
 ///
 /// Conservative subset of SVGO `minifyStyles` (CSSO) / oxvg LightningCSS:
 /// strip comments, collapse safe whitespace, drop empty declarations and empty
-/// rules, drop SVG default declarations (`opacity:1`, `fill-rule:nonzero`, …).
+/// rules, drop SVG default declarations (`opacity:1`, `fill-rule:nonzero`, …),
+/// compact `url(#Id)` without folding the fragment, last-declaration-wins.
 /// Does **not** restructure selectors or drop unused rules — `.ocean` / `.land`
 /// stay even if a later unused-selector pass would prune them.
 /// Non-zero CSS `px` is kept (`transform-origin:140px 110px`, `font-size:12px`);
 /// unitless lengths are invalid CSS and browsers drop them.
+///
+/// After CSS minify, runs [`convert_style_to_attrs`] so the default pipeline
+/// (which already calls this pass) picks up cascade-safe promotions.
 pub fn minify_styles(doc: &mut Document) {
     doc.walk_elements_mut(&mut |el| {
         if el.local_name() == "style" {
@@ -59,6 +67,728 @@ pub fn minify_styles(doc: &mut Document) {
             }
         }
     });
+    convert_style_to_attrs(doc);
+}
+
+// ---------------------------------------------------------------------------
+// mergeStyles
+// ---------------------------------------------------------------------------
+
+/// SVGO `mergeStyles` — fold mergeable `<style>` sheets into the first one.
+///
+/// CSS is concatenated verbatim: selector spelling and `url(#Id)` case stay.
+/// This pass does **not** inline rules onto elements or rename / drop IDs.
+///
+/// Matches the public 4.1.0 contract:
+/// * skip the `<foreignObject>` subtree;
+/// * skip a non-CSS `type` (`text/css` and empty / missing are CSS);
+/// * drop empty (whitespace-only) mergeable sheets;
+/// * a `media` attribute becomes `@media …{…}` on the collected text.
+pub fn merge_styles(doc: &mut Document) {
+    let mut chunks = Vec::new();
+    collect_mergeable_style_chunks(&doc.nodes, &mut chunks);
+    let joined = chunks.concat();
+    apply_merged_styles(&mut doc.nodes, &joined, &mut false);
+}
+
+fn is_css_style_type(el: &Element) -> bool {
+    match el.attr("type") {
+        None => true,
+        Some(t) if t.is_empty() => true,
+        Some(t) => t.eq_ignore_ascii_case("text/css"),
+    }
+}
+
+fn style_element_css(el: &Element) -> String {
+    el.children
+        .iter()
+        .filter_map(|n| match n {
+            Node::Text(t) => Some(t.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn wrap_style_media(el: &Element, css: String) -> String {
+    match el.attr("media") {
+        None => css,
+        Some(media) => format!("@media {media}{{{css}}}"),
+    }
+}
+
+fn collect_mergeable_style_chunks(nodes: &[Node], out: &mut Vec<String>) {
+    for node in nodes {
+        let Node::Element(el) = node else {
+            continue;
+        };
+        if el.local_name() == "foreignObject" {
+            continue;
+        }
+        if el.local_name() == "style" {
+            if !is_css_style_type(el) {
+                continue;
+            }
+            let css = style_element_css(el);
+            if css.trim().is_empty() {
+                continue;
+            }
+            out.push(wrap_style_media(el, css));
+            continue;
+        }
+        collect_mergeable_style_chunks(&el.children, out);
+    }
+}
+
+enum MergeStyleAction {
+    Skip,
+    Recurse,
+    Drop,
+    KeepFirst,
+}
+
+fn classify_mergeable_style(el: &Element, wrote_first: bool) -> MergeStyleAction {
+    if el.local_name() == "foreignObject" {
+        return MergeStyleAction::Skip;
+    }
+    if el.local_name() != "style" {
+        return MergeStyleAction::Recurse;
+    }
+    if !is_css_style_type(el) {
+        return MergeStyleAction::Skip;
+    }
+    if style_element_css(el).trim().is_empty() {
+        return MergeStyleAction::Drop;
+    }
+    if wrote_first {
+        MergeStyleAction::Drop
+    } else {
+        MergeStyleAction::KeepFirst
+    }
+}
+
+fn apply_merged_styles(nodes: &mut Vec<Node>, joined: &str, wrote_first: &mut bool) {
+    let mut i = 0;
+    while i < nodes.len() {
+        let action = match &nodes[i] {
+            Node::Element(el) => classify_mergeable_style(el, *wrote_first),
+            _ => MergeStyleAction::Skip,
+        };
+        match action {
+            MergeStyleAction::Skip => i += 1,
+            MergeStyleAction::Recurse => {
+                if let Node::Element(el) = &mut nodes[i] {
+                    apply_merged_styles(&mut el.children, joined, wrote_first);
+                }
+                i += 1;
+            }
+            MergeStyleAction::Drop => {
+                nodes.remove(i);
+            }
+            MergeStyleAction::KeepFirst => {
+                if let Node::Element(el) = &mut nodes[i] {
+                    el.remove_attr("media");
+                    el.children = vec![Node::Text(joined.to_string())];
+                    el.self_closing = false;
+                }
+                *wrote_first = true;
+                i += 1;
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// inlineStyles
+// ---------------------------------------------------------------------------
+
+/// Copy matching stylesheet rules onto `style=""`.
+///
+/// Icon/static subset of SVGO `inlineStyles` (`onlyMatchedOnce`,
+/// `removeMatchedSelectors`). Separate from [`merge_styles`] — this pass
+/// never concatenates sheets.
+///
+/// Safety (do **not** copy SVGO’s onsen `#id` strip):
+/// * never inline `#id` / `type#id` selectors (CSS / SMIL hooks stay);
+/// * never delete `id` / `xml:id`;
+/// * leave `@keyframes` / `@media` / animation / transition rules in the sheet;
+/// * shared class / type selectors (2+ matches) stay in the sheet (sprites).
+///
+/// The default pipeline also skips this pass on motion-sensitive docs
+/// (`MOTION_SKIP_PLUGINS` / animation-aware).
+pub fn inline_styles(doc: &mut Document) {
+    let mut sheets = Vec::new();
+    collect_inline_style_sheets(&doc.nodes, &mut sheets);
+    if sheets.is_empty() {
+        return;
+    }
+    let mut works: Vec<InlineSheetWork> =
+        sheets.iter().map(|css| parse_inline_sheet(css)).collect();
+    let mut once_rules: Vec<(SimpleSel, Vec<(String, String)>)> = Vec::new();
+    for work in &mut works {
+        mark_once_matched_inline_sels(&doc.nodes, work, &mut once_rules);
+    }
+    apply_once_matched_inline_rules(&mut doc.nodes, &once_rules);
+    let rewritten: Vec<String> = works.iter().map(reconstruct_inline_sheet).collect();
+    let mut i = 0usize;
+    write_inline_style_sheets(&mut doc.nodes, &rewritten, &mut i);
+    drop_empty_css_style_elements(&mut doc.nodes);
+}
+
+fn collect_inline_style_sheets(nodes: &[Node], out: &mut Vec<String>) {
+    for node in nodes {
+        let Node::Element(el) = node else {
+            continue;
+        };
+        if el.local_name() == "foreignObject" {
+            continue;
+        }
+        if el.local_name() == "style" && is_css_style_type(el) {
+            out.push(style_element_css(el));
+        }
+        collect_inline_style_sheets(&el.children, out);
+    }
+}
+
+struct InlineSheetWork {
+    rules: Vec<InlineRule>,
+}
+
+enum InlineRule {
+    KeepRaw(String),
+    Style { parts: Vec<InlineSel>, body: String },
+}
+
+enum InlineSel {
+    Keep(String),
+    Candidate {
+        sel: SimpleSel,
+        raw: String,
+        inlined: bool,
+    },
+}
+
+#[derive(Clone)]
+struct SimpleSel {
+    tag: Option<String>,
+    classes: Vec<String>,
+}
+
+fn parse_inline_sheet(css: &str) -> InlineSheetWork {
+    let stripped = strip_css_comments(css);
+    let mut rules = Vec::new();
+    let mut rest = stripped.as_str();
+    while !rest.is_empty() {
+        match next_css_rule(rest) {
+            Some((selector, body, tail)) => {
+                let sel_trim = selector.trim();
+                if sel_trim.starts_with('@') || inline_css_body_is_motion(body) {
+                    rules.push(InlineRule::KeepRaw(format!("{sel_trim}{{{body}}}")));
+                } else {
+                    let parts = split_selector_list(sel_trim)
+                        .into_iter()
+                        .map(|raw| match parse_inlineable_selector(&raw) {
+                            Some(sel) => InlineSel::Candidate {
+                                sel,
+                                raw,
+                                inlined: false,
+                            },
+                            None => InlineSel::Keep(raw),
+                        })
+                        .collect();
+                    rules.push(InlineRule::Style {
+                        parts,
+                        body: body.to_string(),
+                    });
+                }
+                rest = tail;
+            }
+            None => {
+                let leftover = rest.trim();
+                if !leftover.is_empty() {
+                    rules.push(InlineRule::KeepRaw(leftover.to_string()));
+                }
+                break;
+            }
+        }
+    }
+    InlineSheetWork { rules }
+}
+
+fn inline_css_body_is_motion(body: &str) -> bool {
+    let l = body.to_ascii_lowercase();
+    l.contains("animation") || l.contains("transition") || l.contains("@keyframes")
+}
+
+fn split_selector_list(list: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = list.as_bytes();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut quote: Option<u8> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i = i.saturating_add(2);
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' || b == b'\'' {
+            quote = Some(b);
+            i += 1;
+            continue;
+        }
+        if b == b',' {
+            let part = list[start..i].trim();
+            if !part.is_empty() {
+                out.push(part.to_string());
+            }
+            start = i + 1;
+        }
+        i += 1;
+    }
+    let part = list[start..].trim();
+    if !part.is_empty() {
+        out.push(part.to_string());
+    }
+    out
+}
+
+fn parse_inlineable_selector(raw: &str) -> Option<SimpleSel> {
+    let s = raw.trim();
+    if s.is_empty() || s.contains('\\') || s.contains('#') {
+        return None;
+    }
+    if s.bytes().any(|b| {
+        matches!(
+            b,
+            b' ' | b'\t'
+                | b'\n'
+                | b'\r'
+                | b'>'
+                | b'+'
+                | b'~'
+                | b'['
+                | b']'
+                | b':'
+                | b'*'
+                | b'|'
+                | b'@'
+        )
+    }) {
+        return None;
+    }
+    let mut tag = None;
+    let mut classes = Vec::new();
+    let mut rest = s;
+    if !rest.starts_with('.') {
+        let end = rest.find('.').unwrap_or(rest.len());
+        let t = &rest[..end];
+        if t.is_empty() || !is_css_ident(t) {
+            return None;
+        }
+        tag = Some(t.to_ascii_lowercase());
+        rest = &rest[end..];
+    }
+    while !rest.is_empty() {
+        if !rest.starts_with('.') {
+            return None;
+        }
+        rest = &rest[1..];
+        let end = rest.find('.').unwrap_or(rest.len());
+        let c = &rest[..end];
+        if c.is_empty() || !is_css_ident(c) {
+            return None;
+        }
+        classes.push(c.to_string());
+        rest = &rest[end..];
+    }
+    if tag.is_none() && classes.is_empty() {
+        return None;
+    }
+    Some(SimpleSel { tag, classes })
+}
+
+fn is_css_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '-' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+fn mark_once_matched_inline_sels(
+    nodes: &[Node],
+    work: &mut InlineSheetWork,
+    once_rules: &mut Vec<(SimpleSel, Vec<(String, String)>)>,
+) {
+    for rule in &mut work.rules {
+        let InlineRule::Style { parts, body } = rule else {
+            continue;
+        };
+        let decls = parse_style_decls(body);
+        if decls.is_empty() {
+            continue;
+        }
+        for part in parts {
+            let InlineSel::Candidate { sel, inlined, .. } = part else {
+                continue;
+            };
+            if count_simple_sel_matches(nodes, sel) == 1 {
+                once_rules.push((sel.clone(), decls.clone()));
+                *inlined = true;
+            }
+        }
+    }
+}
+
+fn count_simple_sel_matches(nodes: &[Node], sel: &SimpleSel) -> usize {
+    let mut n = 0usize;
+    walk_count_simple_sel(nodes, sel, &mut n);
+    n
+}
+
+fn walk_count_simple_sel(nodes: &[Node], sel: &SimpleSel, n: &mut usize) {
+    for node in nodes {
+        let Node::Element(el) = node else {
+            continue;
+        };
+        if el.local_name() == "foreignObject" {
+            continue;
+        }
+        if element_matches_simple_sel(el, sel) {
+            *n += 1;
+        }
+        walk_count_simple_sel(&el.children, sel, n);
+    }
+}
+
+fn element_matches_simple_sel(el: &Element, sel: &SimpleSel) -> bool {
+    if el.local_name() == "style" || el.local_name() == "script" {
+        return false;
+    }
+    if let Some(tag) = &sel.tag {
+        if !el.local_name().eq_ignore_ascii_case(tag) {
+            return false;
+        }
+    }
+    if !sel.classes.is_empty() {
+        let class = el.attr("class").unwrap_or("");
+        if !sel
+            .classes
+            .iter()
+            .all(|c| class.split_whitespace().any(|t| t == c))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn apply_once_matched_inline_rules(
+    nodes: &mut [Node],
+    once_rules: &[(SimpleSel, Vec<(String, String)>)],
+) {
+    if once_rules.is_empty() {
+        return;
+    }
+    for node in nodes {
+        let Node::Element(el) = node else {
+            continue;
+        };
+        if el.local_name() == "foreignObject" {
+            continue;
+        }
+        let original = el.attr("style").unwrap_or("").to_string();
+        let mut incoming = Vec::new();
+        for (sel, decls) in once_rules {
+            if element_matches_simple_sel(el, sel) {
+                incoming.extend(decls.iter().cloned());
+            }
+        }
+        if !incoming.is_empty() {
+            keep_last_decl_wins(&mut incoming);
+            incoming.extend(parse_style_decls(&original));
+            keep_last_decl_wins(&mut incoming);
+            if incoming.is_empty() {
+                el.remove_attr("style");
+            } else {
+                let next = incoming
+                    .into_iter()
+                    .map(|(k, v)| format!("{k}:{v}"))
+                    .collect::<Vec<_>>()
+                    .join(";");
+                el.set_attr("style", next);
+            }
+        }
+        apply_once_matched_inline_rules(&mut el.children, once_rules);
+    }
+}
+
+fn reconstruct_inline_sheet(work: &InlineSheetWork) -> String {
+    let mut out = String::new();
+    for rule in &work.rules {
+        match rule {
+            InlineRule::KeepRaw(raw) => out.push_str(raw),
+            InlineRule::Style { parts, body } => {
+                let kept: Vec<&str> = parts
+                    .iter()
+                    .filter_map(|p| match p {
+                        InlineSel::Keep(raw) => Some(raw.as_str()),
+                        InlineSel::Candidate { raw, inlined, .. } if !*inlined => {
+                            Some(raw.as_str())
+                        }
+                        InlineSel::Candidate { .. } => None,
+                    })
+                    .collect();
+                if !kept.is_empty() {
+                    out.push_str(&kept.join(","));
+                    out.push('{');
+                    out.push_str(body);
+                    out.push('}');
+                }
+            }
+        }
+    }
+    out
+}
+
+fn write_style_element_css(el: &mut Element, css: &str) {
+    let mut wrote = false;
+    for child in &mut el.children {
+        if let Node::Text(t) = child {
+            if !wrote {
+                *t = css.to_string();
+                wrote = true;
+            } else {
+                t.clear();
+            }
+        }
+    }
+    if !wrote && !css.is_empty() {
+        el.children.push(Node::Text(css.to_string()));
+        el.self_closing = false;
+    }
+}
+
+fn write_inline_style_sheets(nodes: &mut [Node], sheets: &[String], i: &mut usize) {
+    for node in nodes {
+        let Node::Element(el) = node else {
+            continue;
+        };
+        if el.local_name() == "foreignObject" {
+            continue;
+        }
+        if el.local_name() == "style" && is_css_style_type(el) {
+            if let Some(css) = sheets.get(*i) {
+                write_style_element_css(el, css);
+            }
+            *i += 1;
+        }
+        write_inline_style_sheets(&mut el.children, sheets, i);
+    }
+}
+
+fn drop_empty_css_style_elements(nodes: &mut Vec<Node>) {
+    nodes.retain(|n| match n {
+        Node::Element(el)
+            if el.local_name() == "style"
+                && is_css_style_type(el)
+                && style_element_css(el).trim().is_empty() =>
+        {
+            false
+        }
+        _ => true,
+    });
+    for node in nodes.iter_mut() {
+        if let Node::Element(el) = node {
+            if el.local_name() == "foreignObject" {
+                continue;
+            }
+            drop_empty_css_style_elements(&mut el.children);
+        }
+    }
+}
+
+/// Conservative `convertStyleToAttrs` (SVGO opt-in; we keep it cascade-safe).
+///
+/// Promotes presentation declarations from `style=""` to attributes only when
+/// that cannot lose to a stylesheet: no `<style>` in the document, no `class`
+/// on the element, no SMIL child, no `!important`, and no existing attribute
+/// of the same name. `url(#Id)` case is preserved. CSS-only values (`var()`,
+/// `calc()`, …) and `transform` / `transform-origin` stay in `style` (the
+/// latter keeps non-zero `px`).
+pub fn convert_style_to_attrs(doc: &mut Document) {
+    if document_has_style_element(&doc.nodes) {
+        return;
+    }
+    doc.walk_elements_mut(&mut |el| {
+        promote_style_attrs(el);
+    });
+}
+
+fn document_has_style_element(nodes: &[Node]) -> bool {
+    for node in nodes {
+        if let Node::Element(el) = node {
+            if el.local_name() == "style" {
+                return true;
+            }
+            if document_has_style_element(&el.children) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn promote_style_attrs(el: &mut Element) {
+    if el.attr("class").is_some_and(|c| !c.trim().is_empty()) {
+        return;
+    }
+    if element_has_smil_child(el) {
+        return;
+    }
+    let Some(style) = el.attr("style").map(str::to_string) else {
+        return;
+    };
+    let decls = parse_style_decls(&style);
+    if decls.is_empty() {
+        return;
+    }
+    let mut kept = Vec::new();
+    let mut promoted = Vec::new();
+    for (k, v) in decls {
+        if can_promote_style_decl(el, &k, &v) {
+            promoted.push((k, v));
+        } else {
+            kept.push((k, v));
+        }
+    }
+    if promoted.is_empty() {
+        return;
+    }
+    for (k, v) in promoted {
+        el.set_attr(&k, promoted_attr_value(&v));
+    }
+    if kept.is_empty() {
+        el.remove_attr("style");
+    } else {
+        let next = kept
+            .into_iter()
+            .map(|(k, v)| format!("{k}:{v}"))
+            .collect::<Vec<_>>()
+            .join(";");
+        el.set_attr("style", next);
+    }
+}
+
+fn element_has_smil_child(el: &Element) -> bool {
+    el.children.iter().any(|n| match n {
+        Node::Element(c) => is_smil_element(c.local_name()),
+        _ => false,
+    })
+}
+
+fn can_promote_style_decl(el: &Element, prop: &str, value: &str) -> bool {
+    if !is_promotable_presentation_attr(prop) {
+        return false;
+    }
+    if has_important(value) {
+        return false;
+    }
+    if el.attr(prop).is_some() {
+        return false;
+    }
+    if is_css_only_value(value) || is_css_wide_keyword(value) {
+        return false;
+    }
+    true
+}
+
+fn promoted_attr_value(v: &str) -> String {
+    if let Some(mini) = try_minify_css_url(v) {
+        return mini;
+    }
+    v.trim().to_string()
+}
+
+fn has_important(value: &str) -> bool {
+    value.trim().to_ascii_lowercase().ends_with("!important")
+}
+
+fn is_css_only_value(v: &str) -> bool {
+    let l = v.to_ascii_lowercase();
+    l.contains("var(")
+        || l.contains("calc(")
+        || l.contains("min(")
+        || l.contains("max(")
+        || l.contains("clamp(")
+        || l.contains("env(")
+        || l.contains("attr(")
+}
+
+fn is_css_wide_keyword(v: &str) -> bool {
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "initial" | "unset" | "revert" | "revert-layer"
+    )
+}
+
+/// SVG presentation attributes that match the CSS property 1:1.
+/// `transform` / `transform-origin` / `font-family` stay in CSS (syntax / px / quotes).
+fn is_promotable_presentation_attr(name: &str) -> bool {
+    matches!(
+        name,
+        "fill"
+            | "stroke"
+            | "color"
+            | "stop-color"
+            | "flood-color"
+            | "lighting-color"
+            | "fill-opacity"
+            | "stroke-opacity"
+            | "stop-opacity"
+            | "flood-opacity"
+            | "opacity"
+            | "stroke-width"
+            | "stroke-linecap"
+            | "stroke-linejoin"
+            | "stroke-miterlimit"
+            | "stroke-dasharray"
+            | "stroke-dashoffset"
+            | "fill-rule"
+            | "clip-rule"
+            | "clip-path"
+            | "mask"
+            | "filter"
+            | "marker-start"
+            | "marker-mid"
+            | "marker-end"
+            | "display"
+            | "visibility"
+            | "overflow"
+            | "font-size"
+            | "font-weight"
+            | "font-style"
+            | "letter-spacing"
+            | "word-spacing"
+            | "text-anchor"
+            | "text-decoration"
+            | "paint-order"
+            | "vector-effect"
+            | "pointer-events"
+            | "shape-rendering"
+            | "color-interpolation"
+            | "color-rendering"
+            | "image-rendering"
+            | "text-rendering"
+    )
 }
 
 /// `convertEllipseToCircle` — `rx == ry` only (SVGO / oxvg default).
@@ -136,12 +866,18 @@ pub fn convert_colors(doc: &mut Document) {
 // ---------------------------------------------------------------------------
 
 /// Compact numeric presentation attrs. Rounds to
-/// [`NON_PATH_FLOAT_PRECISION`] (SVGO `cleanupNumericValues` default = 3).
+/// [`DEFAULT_NUMERIC_PRECISION`] (SVGO `cleanupNumericValues` default = 3).
 ///
 /// `0.18` → `.18`, `1.50px` → `1.5`, `60.9866` → `60.987`. Does **not**
 /// touch SMIL timing (`begin` / `end` / `dur` / `values` / `keyTimes` /
 /// `keySplines`) or path `d`.
 pub fn cleanup_numeric_values(doc: &mut Document) {
+    cleanup_numeric_values_with(doc, NON_PATH_FLOAT_PRECISION);
+}
+
+/// Like [`cleanup_numeric_values`], with an explicit decimal-place count.
+pub fn cleanup_numeric_values_with(doc: &mut Document, precision: i32) {
+    let precision = precision.clamp(0, 20);
     doc.walk_elements_mut(&mut |el| {
         let smil = is_smil_element(el.local_name());
         let keys: Vec<String> = el.attrs.iter().map(|(k, _)| k.clone()).collect();
@@ -153,7 +889,7 @@ pub fn cleanup_numeric_values(doc: &mut Document) {
                 continue;
             }
             if let Some(v) = el.attr(&k).map(str::to_string) {
-                let next = minify_numeric_attr(&v, true);
+                let next = minify_numeric_attr(&v, true, precision);
                 if next != v {
                     el.set_attr(&k, next);
                 }
@@ -226,22 +962,22 @@ fn is_numeric_attr(name: &str) -> bool {
     ) || name.ends_with("-opacity")
 }
 
-fn minify_numeric_attr(raw: &str, round: bool) -> String {
+fn minify_numeric_attr(raw: &str, round: bool, precision: i32) -> String {
     let t = raw.trim();
     if t.is_empty() || t.eq_ignore_ascii_case("none") || t.eq_ignore_ascii_case("inherit") {
         return raw.trim().to_string();
     }
     if t.contains(',') || t.contains(char::is_whitespace) {
-        return minify_number_list(t, round);
+        return minify_number_list(t, round, precision);
     }
-    minify_one_numeric(t, round)
+    minify_one_numeric(t, round, precision)
 }
 
 fn lossless_numeric(tok: &str) -> String {
-    minify_one_numeric(tok, false)
+    minify_one_numeric(tok, false, NON_PATH_FLOAT_PRECISION)
 }
 
-fn minify_number_list(s: &str, round: bool) -> String {
+fn minify_number_list(s: &str, round: bool, precision: i32) -> String {
     let mut p = NumericParser::new(s);
     let mut out = String::new();
     loop {
@@ -256,7 +992,7 @@ fn minify_number_list(s: &str, round: bool) -> String {
             break;
         }
         let tok = &s[start..p.i];
-        let mini = minify_one_numeric(tok.trim(), round);
+        let mini = minify_one_numeric(tok.trim(), round, precision);
         if needs_numeric_sep(&out, &mini) {
             out.push(' ');
         }
@@ -290,11 +1026,11 @@ fn needs_numeric_sep(out: &str, next: &str) -> bool {
     prev.is_ascii_digit() || prev == '.'
 }
 
-fn minify_one_numeric(tok: &str, round: bool) -> String {
+fn minify_one_numeric(tok: &str, round: bool, precision: i32) -> String {
     let tok = tok.trim();
     let (num, unit) = split_trailing_unit(tok);
     let compact = if round {
-        round_then_compact(num)
+        round_then_compact(num, precision)
     } else {
         crate::plugin_paths::minify_number_lexeme(num)
     };
@@ -305,17 +1041,18 @@ fn minify_one_numeric(tok: &str, round: bool) -> String {
     format!("{compact}{unit}")
 }
 
-fn round_then_compact(num: &str) -> String {
+fn round_then_compact(num: &str, precision: i32) -> String {
     let Ok(v) = num.parse::<f64>() else {
         return crate::plugin_paths::minify_number_lexeme(num);
     };
     if !v.is_finite() {
         return crate::plugin_paths::minify_number_lexeme(num);
     }
-    let factor = 10f64.powi(NON_PATH_FLOAT_PRECISION);
+    let factor = 10f64.powi(precision);
     let rounded = (v * factor).round() / factor;
     // Enough decimals for the precision, then strip trailing zeros.
-    let formatted = format!("{rounded:.3}");
+    let prec = usize::try_from(precision.max(0)).unwrap_or(0);
+    let formatted = format!("{rounded:.prec$}");
     crate::plugin_paths::minify_number_lexeme(&formatted)
 }
 
@@ -573,7 +1310,9 @@ fn css_brace_body(after_open: &str) -> Option<(&str, &str)> {
 }
 
 fn compact_decl_list(body: &str) -> String {
-    parse_style_decls(body)
+    let mut decls = parse_style_decls(body);
+    keep_last_decl_wins(&mut decls);
+    decls
         .into_iter()
         .filter(|(k, v)| !is_default_css_decl(k, v))
         .map(|(k, v)| format!("{k}:{}", minify_css_value(&v)))
@@ -581,13 +1320,34 @@ fn compact_decl_list(body: &str) -> String {
         .join(";")
 }
 
+/// CSS last-declaration-wins. Drop earlier duplicates, keep relative order.
+fn keep_last_decl_wins(decls: &mut Vec<(String, String)>) {
+    let mut seen = HashSet::new();
+    let mut keep = vec![false; decls.len()];
+    for (i, (k, _)) in decls.iter().enumerate().rev() {
+        if seen.insert(k.clone()) {
+            keep[i] = true;
+        }
+    }
+    let mut i = 0;
+    decls.retain(|_| {
+        let on = keep[i];
+        i += 1;
+        on
+    });
+}
+
 fn minify_css_value(v: &str) -> String {
     let t = v.trim();
     if t.is_empty() {
         return t.to_string();
     }
+    // Compact a lone `url(#Id)` (quotes / inner ws) without folding the fragment.
+    if let Some(mini) = try_minify_css_url(t) {
+        return mini;
+    }
     // Lossless only — do not precision-3 `stroke-width:.99986893` on the map.
-    // `url(` / `var(` / `calc(` all contain `(`; leave the argument intact.
+    // `var(` / `calc(` / multi-arg paints stay intact (case + spaces).
     if t.contains('(') {
         return t.to_string();
     }
@@ -596,6 +1356,88 @@ fn minify_css_value(v: &str) -> String {
     // browsers drop them (onsen bob/tilt origin, heraldry type size).
     // Presentation attrs still strip `px` via `cleanupNumericValues`.
     minify_css_length_list(t)
+}
+
+/// `url( '#poolFill' )` → `url(#poolFill)`. Leaves `var()` / fallback paints.
+fn try_minify_css_url(raw: &str) -> Option<String> {
+    let t = raw.trim();
+    let after_fn = strip_prefix_ignore_ascii_case(t, "url(")?;
+    let (inner, rest) = split_css_url_inner(after_fn)?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    let inner = inner.trim();
+    let arg = unquote_css_string(inner).unwrap_or(inner);
+    if is_safe_bare_url_arg(arg) {
+        Some(format!("url({arg})"))
+    } else {
+        Some(format!("url({inner})"))
+    }
+}
+
+fn strip_prefix_ignore_ascii_case<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    if s.len() < prefix.len() {
+        return None;
+    }
+    let (head, tail) = s.split_at(prefix.len());
+    if head.eq_ignore_ascii_case(prefix) {
+        Some(tail)
+    } else {
+        None
+    }
+}
+
+fn split_css_url_inner(after_open: &str) -> Option<(&str, &str)> {
+    let bytes = after_open.as_bytes();
+    let mut i = 0;
+    let mut quote: Option<u8> = None;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if let Some(q) = quote {
+            if b == b'\\' {
+                i += 2;
+                continue;
+            }
+            if b == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if b == b'"' || b == b'\'' {
+            quote = Some(b);
+            i += 1;
+            continue;
+        }
+        if b == b')' {
+            return Some((&after_open[..i], &after_open[i + 1..]));
+        }
+        i += 1;
+    }
+    None
+}
+
+fn unquote_css_string(s: &str) -> Option<&str> {
+    let s = s.trim();
+    let b = s.as_bytes();
+    if b.len() >= 2 && (b[0] == b'"' || b[0] == b'\'') && b[b.len() - 1] == b[0] {
+        Some(&s[1..s.len() - 1])
+    } else {
+        None
+    }
+}
+
+fn is_safe_bare_url_arg(s: &str) -> bool {
+    if s.is_empty() || s.contains("://") {
+        return false;
+    }
+    let mut chars = s.chars();
+    match chars.next() {
+        Some('#') | Some('_') => {}
+        Some(c) if c.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '#'))
 }
 
 /// Compact a CSS length list without stripping required `px`.
@@ -1982,6 +2824,17 @@ mod tests {
             .collect()
     }
 
+    fn collect_named<'a>(el: &'a Element, name: &str, out: &mut Vec<&'a Element>) {
+        if el.local_name() == name {
+            out.push(el);
+        }
+        for c in &el.children {
+            if let Node::Element(e) = c {
+                collect_named(e, name, out);
+            }
+        }
+    }
+
     #[test]
     fn minify_styles_strips_comments_and_empty_decls() {
         let mut doc = svg(vec![Node::Element(el(
@@ -2007,10 +2860,58 @@ mod tests {
             vec![],
         ))]);
         minify_styles(&mut doc);
-        let style = find(root(&doc), "rect").unwrap().attr("style").unwrap();
+        let rect = find(root(&doc), "rect").unwrap();
+        let style = rect.attr("style").unwrap();
         assert!(style.contains("calc(1px + 2px)"), "{style}");
         assert!(style.contains("\"A B\""), "{style}");
-        assert!(!style.contains("fill: blue"), "{style}");
+        assert!(!style.contains("fill:"), "{style}");
+        assert_eq!(rect.attr("fill"), Some("blue"));
+    }
+
+    #[test]
+    fn minify_styles_compacts_url_keeps_id_case() {
+        let mut doc = svg(vec![
+            Node::Element(el(
+                "style",
+                &[],
+                vec![Node::Text(
+                    ".pool{fill: url( '#poolFill' );stroke:URL( #waterShine )}".into(),
+                )],
+            )),
+            Node::Element(el(
+                "rect",
+                &[("style", "clip-path: url( \"#ClipMe\" )")],
+                vec![],
+            )),
+        ]);
+        minify_styles(&mut doc);
+        let css = text_of(find(root(&doc), "style").unwrap());
+        assert!(css.contains("url(#poolFill)"), "{css}");
+        assert!(css.contains("url(#waterShine)"), "{css}");
+        assert!(!css.contains("url(#poolfill)"), "{css}");
+        assert!(!css.contains("url(#watershine)"), "{css}");
+        // Stylesheet present → do not promote (cascade). Still compact url().
+        let style = find(root(&doc), "rect").unwrap().attr("style").unwrap();
+        assert!(style.contains("url(#ClipMe)"), "{style}");
+        assert!(!style.contains("url(#clipme)"), "{style}");
+        assert!(find(root(&doc), "rect")
+            .unwrap()
+            .attr("clip-path")
+            .is_none());
+    }
+
+    #[test]
+    fn minify_styles_last_decl_wins() {
+        let mut doc = svg(vec![Node::Element(el(
+            "style",
+            &[],
+            vec![Node::Text(".x{fill:red;opacity:.5;fill:blue}".into())],
+        ))]);
+        minify_styles(&mut doc);
+        let css = text_of(find(root(&doc), "style").unwrap());
+        assert!(css.contains("fill:blue"), "{css}");
+        assert!(!css.contains("fill:red"), "{css}");
+        assert!(css.contains("opacity:.5"), "{css}");
     }
 
     #[test]
@@ -2022,6 +2923,326 @@ mod tests {
         ))]);
         minify_styles(&mut doc);
         assert!(find(root(&doc), "rect").unwrap().attr("style").is_none());
+    }
+
+    #[test]
+    fn merge_styles_joins_sheets_keeps_selector_and_url_case() {
+        let mut doc = svg(vec![
+            Node::Element(el(
+                "style",
+                &[],
+                vec![Node::Text(".ocean{fill:url(#poolFill)}".into())],
+            )),
+            Node::Element(el(
+                "defs",
+                &[],
+                vec![Node::Element(el(
+                    "style",
+                    &[],
+                    vec![Node::Text("#ClipMe{stroke:url(#waterShine)}".into())],
+                ))],
+            )),
+            Node::Element(el("linearGradient", &[("id", "poolFill")], vec![])),
+            Node::Element(el("linearGradient", &[("id", "waterShine")], vec![])),
+            Node::Element(el("rect", &[("id", "ClipMe"), ("class", "ocean")], vec![])),
+        ]);
+        merge_styles(&mut doc);
+        let mut styles = Vec::new();
+        collect_named(root(&doc), "style", &mut styles);
+        assert_eq!(styles.len(), 1, "{:?}", styles.len());
+        let css = text_of(styles[0]);
+        assert!(
+            css.contains(".ocean{fill:url(#poolFill)}"),
+            "selector / url case must stay: {css}"
+        );
+        assert!(
+            css.contains("#ClipMe{stroke:url(#waterShine)}"),
+            "id selector / url case must stay: {css}"
+        );
+        assert!(!css.contains("url(#poolfill)"), "{css}");
+        assert!(!css.contains("url(#watershine)"), "{css}");
+        assert!(!css.contains("#clipme"), "{css}");
+        let grads: Vec<_> = {
+            let mut g = Vec::new();
+            collect_named(root(&doc), "linearGradient", &mut g);
+            g
+        };
+        assert!(grads.iter().any(|e| e.attr("id") == Some("poolFill")));
+        assert!(grads.iter().any(|e| e.attr("id") == Some("waterShine")));
+        let rect = find(root(&doc), "rect").unwrap();
+        assert_eq!(rect.attr("id"), Some("ClipMe"));
+        assert_eq!(rect.attr("class"), Some("ocean"));
+        assert!(
+            rect.attr("fill").is_none(),
+            "mergeStyles must not inline IDs away: {:?}",
+            rect.attrs
+        );
+        assert!(rect.attr("stroke").is_none(), "{:?}", rect.attrs);
+    }
+
+    #[test]
+    fn merge_styles_wraps_media_and_drops_empty() {
+        let mut doc = svg(vec![
+            Node::Element(el("style", &[], vec![])),
+            Node::Element(el(
+                "style",
+                &[("media", "print")],
+                vec![Node::Text(".st0{fill:red}".into())],
+            )),
+            Node::Element(el("style", &[], vec![Node::Text("  \n  ".into())])),
+            Node::Element(el(
+                "style",
+                &[],
+                vec![Node::Text(".test{background:red}".into())],
+            )),
+            Node::Element(el(
+                "style",
+                &[("media", "only screen and (min-width: 600px)")],
+                vec![Node::Text(".wrapper{color:blue}".into())],
+            )),
+        ]);
+        merge_styles(&mut doc);
+        let mut styles = Vec::new();
+        collect_named(root(&doc), "style", &mut styles);
+        assert_eq!(styles.len(), 1);
+        assert!(styles[0].attr("media").is_none());
+        let css = text_of(styles[0]);
+        assert_eq!(
+            css,
+            "@media print{.st0{fill:red}}.test{background:red}@media only screen and (min-width: 600px){.wrapper{color:blue}}"
+        );
+    }
+
+    #[test]
+    fn merge_styles_skips_non_css_type_and_foreign_object() {
+        let mut doc = svg(vec![
+            Node::Element(el("style", &[], vec![Node::Text(".a{fill:blue}".into())])),
+            Node::Element(el(
+                "style",
+                &[("type", "")],
+                vec![Node::Text(".b{fill:green}".into())],
+            )),
+            Node::Element(el(
+                "style",
+                &[("type", "text/css")],
+                vec![Node::Text(".c{fill:red}".into())],
+            )),
+            Node::Element(el(
+                "style",
+                &[("type", "text/invalid")],
+                vec![Node::Text(".d{fill:navy}".into())],
+            )),
+            Node::Element(el(
+                "foreignObject",
+                &[],
+                vec![Node::Element(el(
+                    "style",
+                    &[],
+                    vec![Node::Text(".html{color:gold}".into())],
+                ))],
+            )),
+        ]);
+        merge_styles(&mut doc);
+        let mut styles = Vec::new();
+        collect_named(root(&doc), "style", &mut styles);
+        assert_eq!(styles.len(), 3, "merged CSS + invalid type + foreignObject");
+        let merged = styles
+            .iter()
+            .find(|s| text_of(s).contains(".a{fill:blue}"))
+            .expect("merged sheet");
+        let css = text_of(merged);
+        assert!(css.contains(".b{fill:green}"), "{css}");
+        assert!(css.contains(".c{fill:red}"), "{css}");
+        assert!(!css.contains(".d{fill:navy}"), "{css}");
+        assert!(!css.contains(".html"), "{css}");
+        let invalid = styles
+            .iter()
+            .find(|s| s.attr("type") == Some("text/invalid"))
+            .expect("invalid type stays");
+        assert_eq!(text_of(invalid), ".d{fill:navy}");
+        let fo = find(root(&doc), "foreignObject").unwrap();
+        let fo_style = find(fo, "style").unwrap();
+        assert_eq!(text_of(fo_style), ".html{color:gold}");
+    }
+
+    #[test]
+    fn merge_styles_is_idempotent_and_leaves_styleless() {
+        let mut none = svg(vec![Node::Element(el("rect", &[("class", "st0")], vec![]))]);
+        merge_styles(&mut none);
+        let mut styles = Vec::new();
+        collect_named(root(&none), "style", &mut styles);
+        assert!(styles.is_empty());
+
+        let mut empty = svg(vec![
+            Node::Element(el("style", &[], vec![])),
+            Node::Element(el("style", &[], vec![Node::Text("\n\t".into())])),
+        ]);
+        merge_styles(&mut empty);
+        styles.clear();
+        collect_named(root(&empty), "style", &mut styles);
+        assert!(styles.is_empty());
+
+        let mut doc = svg(vec![
+            Node::Element(el(
+                "style",
+                &[],
+                vec![Node::Text(".a{fill:url(#poolFill)}".into())],
+            )),
+            Node::Element(el("style", &[], vec![Node::Text(".b{fill:#00f}".into())])),
+        ]);
+        merge_styles(&mut doc);
+        merge_styles(&mut doc);
+        styles.clear();
+        collect_named(root(&doc), "style", &mut styles);
+        assert_eq!(styles.len(), 1);
+        assert_eq!(text_of(styles[0]), ".a{fill:url(#poolFill)}.b{fill:#00f}");
+    }
+
+    #[test]
+    fn inline_styles_inlines_once_matched_class_and_type() {
+        let mut doc = svg(vec![
+            Node::Element(el(
+                "style",
+                &[],
+                vec![Node::Text(
+                    ".ink{fill:url(#poolFill)}rect{stroke:#00f}".into(),
+                )],
+            )),
+            Node::Element(el("linearGradient", &[("id", "poolFill")], vec![])),
+            Node::Element(el("rect", &[("class", "ink"), ("width", "10")], vec![])),
+        ]);
+        inline_styles(&mut doc);
+        let mut styles = Vec::new();
+        collect_named(root(&doc), "style", &mut styles);
+        assert!(
+            styles.is_empty(),
+            "once-matched rules should empty the sheet: {:?}",
+            styles.iter().map(|s| text_of(s)).collect::<Vec<_>>()
+        );
+        let rect = find(root(&doc), "rect").unwrap();
+        let style = rect.attr("style").unwrap_or("");
+        assert!(style.contains("url(#poolFill)"), "{style}");
+        assert!(!style.contains("url(#poolfill)"), "{style}");
+        assert!(
+            style.contains("stroke:#00f") || style.contains("stroke:#00F"),
+            "{style}"
+        );
+        assert_eq!(
+            find(root(&doc), "linearGradient").unwrap().attr("id"),
+            Some("poolFill")
+        );
+    }
+
+    #[test]
+    fn inline_styles_keeps_shared_class_and_hash_id() {
+        let mut doc = svg(vec![
+            Node::Element(el(
+                "style",
+                &[],
+                vec![Node::Text(
+                    ".ink{fill:red}#mark{fill:url(#poolFill);stroke:#0a0}".into(),
+                )],
+            )),
+            Node::Element(el("linearGradient", &[("id", "poolFill")], vec![])),
+            Node::Element(el("rect", &[("class", "ink"), ("width", "4")], vec![])),
+            Node::Element(el(
+                "rect",
+                &[("class", "ink"), ("id", "mark"), ("width", "5")],
+                vec![],
+            )),
+        ]);
+        inline_styles(&mut doc);
+        let css = text_of(find(root(&doc), "style").unwrap());
+        assert!(css.contains(".ink"), "sprite class must stay: {css}");
+        assert!(
+            css.contains("#mark"),
+            "must not copy SVGO onsen #id strip: {css}"
+        );
+        assert!(css.contains("url(#poolFill)"), "{css}");
+        let mark = root(&doc)
+            .children
+            .iter()
+            .filter_map(|n| match n {
+                Node::Element(e) if e.attr("id") == Some("mark") => Some(e),
+                _ => None,
+            })
+            .next()
+            .unwrap();
+        assert_eq!(mark.attr("id"), Some("mark"));
+        assert!(mark.attr("style").is_none(), "{:?}", mark.attrs);
+    }
+
+    #[test]
+    fn inline_styles_keeps_motion_hash_id_even_if_invoked() {
+        let mut doc = svg(vec![
+            Node::Element(el(
+                "style",
+                &[],
+                vec![Node::Text(
+                    "@keyframes bob{to{transform:translateY(-2px)}}#floater{animation:bob 1s infinite;fill:red}".into(),
+                )],
+            )),
+            Node::Element(el(
+                "circle",
+                &[("id", "floater"), ("r", "4")],
+                vec![Node::Element(el(
+                    "animate",
+                    &[("attributeName", "r"), ("values", "4;8;4")],
+                    vec![],
+                ))],
+            )),
+        ]);
+        inline_styles(&mut doc);
+        let css = text_of(find(root(&doc), "style").unwrap());
+        assert!(css.contains("#floater"), "{css}");
+        assert!(css.contains("@keyframes"), "{css}");
+        assert_eq!(
+            find(root(&doc), "circle").unwrap().attr("id"),
+            Some("floater")
+        );
+        assert!(find(root(&doc), "circle").unwrap().attr("style").is_none());
+    }
+
+    #[test]
+    fn run_minify_merges_then_minifies_without_folding_ids() {
+        let mut doc = svg(vec![
+            Node::Element(el(
+                "style",
+                &[],
+                vec![Node::Text(" .ocean { fill: url( '#poolFill' ); } ".into())],
+            )),
+            Node::Element(el(
+                "style",
+                &[],
+                vec![Node::Text(" #ClipMe { stroke: url(#waterShine); } ".into())],
+            )),
+            Node::Element(el("linearGradient", &[("id", "poolFill")], vec![])),
+            Node::Element(el("rect", &[("id", "ClipMe"), ("class", "ocean")], vec![])),
+        ]);
+        run_minify(&mut doc);
+        let mut styles = Vec::new();
+        collect_named(root(&doc), "style", &mut styles);
+        assert_eq!(styles.len(), 1);
+        let css = text_of(styles[0]);
+        assert!(
+            css.contains("#ClipMe"),
+            "must keep #id selector (not SVGO onsen strip): {css}"
+        );
+        assert!(css.contains("url(#waterShine)"), "{css}");
+        assert!(!css.contains("url(#poolfill)"), "{css}");
+        assert!(!css.contains("#clipme"), "{css}");
+        assert_eq!(
+            find(root(&doc), "linearGradient").unwrap().attr("id"),
+            Some("poolFill")
+        );
+        let rect = find(root(&doc), "rect").unwrap();
+        assert_eq!(rect.attr("id"), Some("ClipMe"));
+        assert_eq!(rect.attr("class"), Some("ocean"));
+        let painted = format!("{:?} {}", rect.attrs, rect.attr("style").unwrap_or(""));
+        assert!(
+            painted.contains("url(#poolFill)") || css.contains("url(#poolFill)"),
+            "class fill or leftover sheet must keep url(#poolFill): {painted} / {css}"
+        );
     }
 
     #[test]
@@ -2168,6 +3389,38 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_numeric_precision_2_vs_3() {
+        let attrs = &[("viewBox", "0.123456 1.234567 10.345678 11.456789")];
+        let mut a = svg(vec![Node::Element(el("svg", attrs, vec![]))]);
+        let mut b = svg(vec![Node::Element(el("svg", attrs, vec![]))]);
+        cleanup_numeric_values_with(&mut a, 2);
+        cleanup_numeric_values_with(&mut b, 3);
+        let va = root(&a)
+            .children
+            .iter()
+            .find_map(|n| match n {
+                Node::Element(el) if el.local_name() == "svg" => {
+                    el.attr("viewBox").map(str::to_string)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let vb = root(&b)
+            .children
+            .iter()
+            .find_map(|n| match n {
+                Node::Element(el) if el.local_name() == "svg" => {
+                    el.attr("viewBox").map(str::to_string)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(va, ".12 1.23 10.35 11.46");
+        assert_eq!(vb, ".123 1.235 10.346 11.457");
+        assert!(va.len() < vb.len(), "{va} vs {vb}");
+    }
+
+    #[test]
     fn minify_styles_keeps_ocean_land_drops_css_defaults() {
         let mut doc = svg(vec![Node::Element(el(
             "style",
@@ -2220,6 +3473,102 @@ mod tests {
         assert_eq!(circles[0].attr("r"), Some("3"));
         assert!(circles[0].attr("rx").is_none());
         assert_eq!(circles[1].local_name(), "ellipse");
+    }
+
+    #[test]
+    fn convert_style_to_attrs_promotes_safe_inline() {
+        let mut doc = svg(vec![Node::Element(el(
+            "rect",
+            &[(
+                "style",
+                "fill:url( '#poolFill' );stroke:#f00;opacity:0.50;transform-origin:140px 110px",
+            )],
+            vec![],
+        ))]);
+        convert_style_to_attrs(&mut doc);
+        let r = find(root(&doc), "rect").unwrap();
+        assert_eq!(r.attr("fill"), Some("url(#poolFill)"));
+        assert_eq!(r.attr("stroke"), Some("#f00"));
+        assert_eq!(r.attr("opacity"), Some("0.50"));
+        let style = r.attr("style").unwrap();
+        assert!(
+            style.contains("transform-origin:140px 110px"),
+            "non-zero CSS px must stay in style: {style}"
+        );
+        assert!(!style.contains("fill"), "{style}");
+        assert!(!style.contains("url(#poolfill)"), "{style:?} {:?}", r.attrs);
+    }
+
+    #[test]
+    fn convert_style_to_attrs_skips_cascade_and_unsafe() {
+        let mut with_sheet = svg(vec![
+            Node::Element(el("style", &[], vec![Node::Text("rect{fill:blue}".into())])),
+            Node::Element(el("rect", &[("style", "fill:red")], vec![])),
+        ]);
+        convert_style_to_attrs(&mut with_sheet);
+        let r = find(root(&with_sheet), "rect").unwrap();
+        assert_eq!(r.attr("style"), Some("fill:red"));
+        assert!(r.attr("fill").is_none());
+
+        let mut classed = svg(vec![Node::Element(el(
+            "rect",
+            &[("class", "ocean"), ("style", "fill:red")],
+            vec![],
+        ))]);
+        convert_style_to_attrs(&mut classed);
+        assert_eq!(
+            find(root(&classed), "rect").unwrap().attr("style"),
+            Some("fill:red")
+        );
+
+        let mut existing = svg(vec![Node::Element(el(
+            "rect",
+            &[("fill", "blue"), ("style", "fill:red;stroke:none")],
+            vec![],
+        ))]);
+        convert_style_to_attrs(&mut existing);
+        let r = find(root(&existing), "rect").unwrap();
+        assert_eq!(r.attr("fill"), Some("blue"));
+        assert_eq!(r.attr("stroke"), Some("none"));
+        assert_eq!(r.attr("style"), Some("fill:red"));
+
+        let mut important = svg(vec![Node::Element(el(
+            "rect",
+            &[("style", "fill:red!important")],
+            vec![],
+        ))]);
+        convert_style_to_attrs(&mut important);
+        assert_eq!(
+            find(root(&important), "rect").unwrap().attr("style"),
+            Some("fill:red!important")
+        );
+
+        let mut calc = svg(vec![Node::Element(el(
+            "rect",
+            &[("style", "fill:var(--BrandFill);stroke:calc(1px)")],
+            vec![],
+        ))]);
+        convert_style_to_attrs(&mut calc);
+        let r = find(root(&calc), "rect").unwrap();
+        assert!(r.attr("fill").is_none());
+        assert!(r.attr("stroke").is_none());
+        let style = r.attr("style").unwrap();
+        assert!(style.contains("var(--BrandFill)"), "{style}");
+
+        let mut motion = svg(vec![Node::Element(el(
+            "rect",
+            &[("style", "fill:red")],
+            vec![Node::Element(el(
+                "animate",
+                &[("attributeName", "fill"), ("to", "blue")],
+                vec![],
+            ))],
+        ))]);
+        convert_style_to_attrs(&mut motion);
+        assert_eq!(
+            find(root(&motion), "rect").unwrap().attr("style"),
+            Some("fill:red")
+        );
     }
 
     #[test]
@@ -2544,10 +3893,33 @@ mod tests {
         assert!(r.attr("id").is_none());
         assert!(r.attr("stroke").is_none());
         assert!(r.attr("stroke-width").is_none());
-        let css = text_of(find(root(&doc), "style").unwrap());
+        let style_attr = r.attr("style").unwrap_or("");
+        let css = find(root(&doc), "style").map(text_of).unwrap_or_default();
         assert!(
-            css.contains("fill:red") || css.contains("fill:#f00"),
-            "{css}"
+            style_attr.contains("fill:red")
+                || style_attr.contains("fill:#f00")
+                || css.contains("fill:red")
+                || css.contains("fill:#f00"),
+            "style={style_attr} css={css}"
         );
+    }
+
+    #[test]
+    fn run_minify_promotes_inline_then_shortens() {
+        let mut doc = svg(vec![Node::Element(el(
+            "rect",
+            &[(
+                "style",
+                "fill: rgb(255, 255, 255); stroke: url( '#poolFill' ); font-size:12px",
+            )],
+            vec![],
+        ))]);
+        run_minify(&mut doc);
+        let r = find(root(&doc), "rect").unwrap();
+        assert_eq!(r.attr("fill"), Some("#fff"));
+        assert_eq!(r.attr("stroke"), Some("url(#poolFill)"));
+        assert_eq!(r.attr("font-size"), Some("12"));
+        assert!(r.attr("style").is_none());
+        assert!(!format!("{:?}", r.attrs).contains("poolfill"));
     }
 }

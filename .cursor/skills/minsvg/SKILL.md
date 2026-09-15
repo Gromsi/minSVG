@@ -1,0 +1,1 @@
+../../../skills/minsvg/SKILL.md

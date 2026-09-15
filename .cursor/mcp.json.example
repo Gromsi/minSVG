@@ -1,0 +1,10 @@
+{
+  // minsvg-mcp: stdio, local only, no TCP.
+  "mcpServers": {
+    "minsvg": {
+      "command": "cargo",
+      "args": ["run", "--features", "mcp", "--bin", "minsvg-mcp"],
+      "cwd": "/absolute/path/to/minSVG"
+    }
+  }
+}

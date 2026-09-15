@@ -2,8 +2,10 @@
 //!
 //! Differentiator vs stock SVGO defaults: when a document is motion-sensitive
 //! we **skip** passes that historically break SMIL / CSS / external JS hooks
-//! (`cleanupIds` rename/drop, `mergePaths`, `convertShapeToPath`,
-//! `collapseGroups`, aggressive path rounding). Embedded-raster recompress
+//! (`cleanupIds` rename/drop, `inlineStyles` `#id` strip, `mergePaths`,
+//! `convertShapeToPath`, `convertTransform`, `collapseGroups`, aggressive
+//! path rounding).
+//! Embedded-raster recompress
 //! and wrapper minify still run — a tiny `<animate>` must not freeze a
 //! multi-megabyte `data:` PNG/JPEG. We do **not** prefix IDs.
 //! If a caller ever prefixes, [`rewrite_smil_clock_value`] updates
@@ -18,12 +20,14 @@ use std::collections::{BTreeSet, HashMap};
 /// Plugins we refuse to run (or would refuse, if implemented) on motion docs.
 pub const MOTION_SKIP_PLUGINS: &[&str] = &[
     "cleanupIds",
+    "inlineStyles",
     "mergePaths",
     "convertShapeToPath",
     "collapseGroups",
     "removeHiddenElems",
     "numericRounding",
     "convertPathData",
+    "convertTransform",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -585,8 +589,24 @@ mod tests {
         assert!(out.svg.contains("pulse.end+.33s"), "{}", out.svg);
         assert!(out.animation.motion_sensitive);
         assert!(out.plugins_skipped.contains(&"cleanupIds"));
+        assert!(out.plugins_skipped.contains(&"inlineStyles"));
         assert!(out.summary.contains("preserved"));
         assert!(out.summary.contains("skipped"));
+    }
+
+    #[test]
+    fn animation_aware_keeps_css_hash_id() {
+        let input = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+          <style>@keyframes bob{to{transform:translateY(-2px)}}#floater{animation:bob 1s infinite;fill:red}</style>
+          <circle id="floater" cx="8" cy="8" r="4">
+            <animate attributeName="r" values="4;6;4" dur="1s" repeatCount="indefinite"/>
+          </circle>
+        </svg>"##;
+        let out = optimize_str(input).unwrap();
+        assert!(out.svg.contains("#floater"), "{}", out.svg);
+        assert!(out.svg.contains("id=\"floater\""), "{}", out.svg);
+        assert!(out.plugins_skipped.contains(&"inlineStyles"));
+        assert!(out.animation.motion_sensitive);
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! glued `0` onto the next number (`6.408 014.1912`), which browsers paint as a
 //! huge white triangle. Keep the fixture tiny so CI is not 1.7MB-bound.
 
-use minsvg::{minify_path_d, optimize_str};
+use minsvg::{minify_path_d, minify_path_d_with, optimize_str, optimize_str_with, Config};
 
 /// Rectangle of cubics — same construction as the blankmap ocean, ~200 bytes.
 const OCEAN_RECT: &str = "M 100,200 C 80,200 60,200 40,200 C 40,160 40,120 40,80 C 60,80 80,80 100,80 C 100,120 100,160 100,200";
@@ -18,14 +18,17 @@ fn extract_d<'a>(svg: &'a str, class: &str) -> &'a str {
     let start = svg
         .find(&marker)
         .unwrap_or_else(|| panic!("missing class={class} in {svg}"));
-    let after = &svg[start..];
-    let d0 = after
+    let tag_start = svg[..start].rfind('<').unwrap_or(0);
+    let tag = &svg[tag_start..];
+    let tag_end = tag.find('>').unwrap_or(tag.len());
+    let tag = &tag[..tag_end];
+    let d0 = tag
         .find("d=\"")
-        .unwrap_or_else(|| panic!("missing d after {class}: {svg}"));
-    let rest = &after[d0 + 3..];
+        .unwrap_or_else(|| panic!("missing d on {class}: {svg}"));
+    let rest = &tag[d0 + 3..];
     let d1 = rest
         .find('"')
-        .unwrap_or_else(|| panic!("unterminated d after {class}"));
+        .unwrap_or_else(|| panic!("unterminated d on {class}"));
     &rest[..d1]
 }
 
@@ -167,4 +170,76 @@ fn ocean_top_edge_minify_keeps_both_cubics() {
     assert!(!out.contains("014.1912"), "{out}");
     assert_eq!(count_dest_points(OCEAN_TOP_EDGE), 3);
     assert_eq!(count_dest_points(&out), 3, "lost a cubic dest: {out}");
+}
+
+#[test]
+fn precision_2_vs_3_size_and_dest_count() {
+    const D: &str = "M 1.23456 2.34567 C 3.45678 4.56789 5.67891 6.78901 7.89012 8.90123 C 1.11111 2.22222 3.33333 4.44444 5.55555 6.66666";
+    let input = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0.123456 1.234567 10.345678 11.456789"><path class="p" d="{D}"/></svg>"#
+    );
+    let mut c2 = Config::default();
+    c2.precision = Some(2);
+    let mut c3 = Config::default();
+    c3.precision = Some(3);
+    let a = optimize_str_with(&input, &c2).expect("prec 2");
+    let b = optimize_str_with(&input, &c3).expect("prec 3");
+    assert!(
+        !a.svg.contains("014.1912") && !b.svg.contains("014.1912"),
+        "digit glue:\n{}\n{}",
+        a.svg,
+        b.svg
+    );
+    let da = extract_d(&a.svg, "p");
+    let db = extract_d(&b.svg, "p");
+    let orig = count_dest_points(D);
+    assert_eq!(count_dest_points(da), orig, "prec2 dests: {da}");
+    assert_eq!(count_dest_points(db), orig, "prec3 dests: {db}");
+    assert!(
+        a.svg.len() <= b.svg.len(),
+        "prec2 {}B > prec3 {}B\n{}\n{}",
+        a.svg.len(),
+        b.svg.len(),
+        a.svg,
+        b.svg
+    );
+    assert!(
+        a.svg.len() < b.svg.len(),
+        "expected prec2 smaller: {} vs {}",
+        a.svg,
+        b.svg
+    );
+
+    let ocean2 = minify_path_d_with(OCEAN_TOP_EDGE, Some(2)).expect("ocean prec2");
+    let ocean3 = minify_path_d_with(OCEAN_TOP_EDGE, Some(3)).expect("ocean prec3");
+    assert!(!ocean2.contains("014.1912") && !ocean3.contains("014.1912"));
+    assert_eq!(count_dest_points(&ocean2), 3, "{ocean2}");
+    assert_eq!(count_dest_points(&ocean3), 3, "{ocean3}");
+}
+
+#[test]
+fn ocean_group_transform_does_not_glue_zero_or_bake_d() {
+    let input = format!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="-30 60 2750 1400">
+<g transform="translate(0.000, 0.000) scale(1.000, 1.000)">
+<path class="ocean" id="ocean" d="{OCEAN_RECT}"/>
+</g>
+</svg>"##
+    );
+    let out = optimize_str(&input).unwrap();
+    let ocean = extract_d(&out.svg, "ocean");
+    assert!(
+        !ocean.contains("014.1912") && !ocean.contains("6.4080"),
+        "implicit-command 0-glue in ocean: {ocean}"
+    );
+    let dests = count_dest_points(ocean);
+    assert!(
+        dests >= 4,
+        "ocean collapsed to {dests} dest points (triangle): {ocean}"
+    );
+    assert!(
+        !out.svg.contains("transform="),
+        "identity translate/scale should drop: {}",
+        out.svg
+    );
 }

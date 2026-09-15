@@ -1,4 +1,5 @@
 //! Loopback smoke for `minsvg serve`. No public bind, no fat fixtures.
+//! Default / port-only `--bind` must stay on 127.0.0.1 (see `serve::resolve_bind`).
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -89,4 +90,40 @@ fn health_and_optimize_on_ephemeral_loopback() {
     assert!(raw_res.contains("200"), "{raw_res}");
     assert!(raw_res.contains("image/svg+xml"), "{raw_res}");
     assert!(raw_res.contains("<svg"), "{raw_res}");
+}
+
+#[test]
+fn port_only_bind_listens_on_loopback() {
+    let port = free_loopback_port();
+    let bind = format!(":{port}");
+    let child = Command::new(env!("CARGO_BIN_EXE_minsvg"))
+        .args(["serve", "--bind", &bind])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn minsvg serve");
+    let _guard = KillOnDrop(child);
+    wait_for_listen(port);
+
+    let health = raw_http(
+        port,
+        "GET /health HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    );
+    assert!(health.contains("200"), "{health}");
+    assert!(health.contains("{\"ok\":true}"), "{health}");
+}
+
+#[test]
+fn serve_refuses_public_bind_without_port() {
+    let output = Command::new(env!("CARGO_BIN_EXE_minsvg"))
+        .args(["serve", "--bind", "0.0.0.0"])
+        .output()
+        .expect("run minsvg serve");
+    assert!(!output.status.success(), "{output:?}");
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        err.contains("invalid --bind") && err.contains("127.0.0.1:8765"),
+        "{err}"
+    );
 }

@@ -1,0 +1,54 @@
+# MSRV is rustc 1.83 (see Cargo.toml rust-version). No secrets. No artifact uploads.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: rustc 1.83 + npm
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: rustc 1.83
+        uses: dtolnay/rust-toolchain@1.83
+
+      - name: rustc version
+        run: rustc --version --verbose
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo test
+        run: cargo test --locked
+
+      - name: cargo test --features mcp
+        run: cargo test --locked --features mcp
+
+      # npm/optimize() spawn-tests look for ../target/debug/minsvg after cargo test.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: npm test
+        working-directory: npm
+        run: npm test
+
+      # npm test already runs pack-check.mjs; keep a dedicated step so the
+      # tarball size/path gate is visible if `test` is later split.
+      - name: npm run pack:check
+        working-directory: npm
+        run: npm run pack:check

@@ -7,7 +7,9 @@
 //!   Implicit-command chunks are space-separated so `0` cannot glue onto the
 //!   next number. Digit-glue and dest-count collapse are refused without a
 //!   second geometry parse.
-//!   **No** `floatPrecision: 3`, arc conversion, or overlapping-subpath merge.
+//!   Optional `--precision` / `Config.precision` rounding (default: lossless,
+//!   no implicit `floatPrecision: 3`). No arc conversion or overlapping-subpath
+//!   merge.
 //! * [`convert_shape_to_path`] — `line`, `polyline`, axis-aligned `rect`
 //!   (no `rx`/`ry`). Circles / ellipses stay (`convertArcs` off).
 //! * [`merge_paths`] — concatenate sibling **stroke-only** (`fill="none"`)
@@ -15,6 +17,9 @@
 //!   filled/class-painted shapes (maps, coats), and SMIL children. A
 //!   leading relative `m` is rewritten as an absolute subpath (not a
 //!   first-letter swap).
+//! * [`convert_transform`] — collapse `translate` / `scale` / `matrix` to a
+//!   shorter equivalent. Drops identity. Does **not** bake into path `d`.
+//!   Skips SMIL-animated transforms (`animateTransform` / `animateMotion`).
 //!
 //! Icon-only: `plugins.rs` skips these when `plan.skip_cleanup_ids`.
 //! A `d` that SMIL animates is never rewritten even if the pass is invoked.
@@ -27,15 +32,25 @@ fn is_xml_s(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r')
 }
 
-pub const PATH_PLUGIN_NAMES: &[&str] = &["convertShapeToPath", "convertPathData", "mergePaths"];
+pub const PATH_PLUGIN_NAMES: &[&str] = &[
+    "convertShapeToPath",
+    "convertPathData",
+    "convertTransform",
+    "mergePaths",
+];
 
 /// Conservative `d` rewrite on path-data hosts. Skips SMIL-animated `d`.
 pub fn convert_path_data(doc: &mut Document) {
-    let locked = collect_smil_locked_d_ids(&doc.nodes);
-    convert_path_data_in(&mut doc.nodes, &locked);
+    convert_path_data_with(doc, None);
 }
 
-fn convert_path_data_in(nodes: &mut [Node], locked: &HashSet<String>) {
+/// Like [`convert_path_data`], with optional coordinate rounding.
+pub fn convert_path_data_with(doc: &mut Document, precision: Option<u8>) {
+    let locked = collect_smil_locked_d_ids(&doc.nodes);
+    convert_path_data_in(&mut doc.nodes, &locked, precision);
+}
+
+fn convert_path_data_in(nodes: &mut [Node], locked: &HashSet<String>, precision: Option<u8>) {
     for node in nodes.iter_mut() {
         let Node::Element(el) = node else {
             continue;
@@ -44,8 +59,10 @@ fn convert_path_data_in(nodes: &mut [Node], locked: &HashSet<String>) {
         let id_locked = el.attr("id").is_some_and(|id| locked.contains(id));
         if is_path_d_host(el.local_name()) && !child_locks && !id_locked {
             if let Some(d) = el.attr("d") {
-                if !path_d_already_tight(d) {
-                    let next = match minify_path_d(d) {
+                let skip_tight = path_d_already_tight(d)
+                    && !precision.is_some_and(|p| has_excess_precision(d, p));
+                if !skip_tight {
+                    let next = match minify_path_d_with(d, precision) {
                         Some(mini) => mini,
                         None => trim_path_d_whitespace(d),
                     };
@@ -55,8 +72,33 @@ fn convert_path_data_in(nodes: &mut [Node], locked: &HashSet<String>) {
                 }
             }
         }
-        convert_path_data_in(&mut el.children, locked);
+        convert_path_data_in(&mut el.children, locked, precision);
     }
+}
+
+/// True when a `d` has a fractional run longer than `prec` (after trailing zeros).
+fn has_excess_precision(d: &str, prec: u8) -> bool {
+    let b = d.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'.' {
+            let mut j = i + 1;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            let mut k = j;
+            while k > i + 1 && b[k - 1] == b'0' {
+                k -= 1;
+            }
+            if k - (i + 1) > prec as usize {
+                return true;
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+    false
 }
 
 /// Skip convertPathData when `d` has no commas, wasted XML space, or
@@ -178,13 +220,31 @@ fn is_path_command_letter(c: char) -> bool {
 /// Minify one `d` string. `None` if the path cannot be parsed safely
 /// or the rewrite would collapse dest-count / glue digits.
 pub fn minify_path_d(d: &str) -> Option<String> {
+    minify_path_d_with(d, None)
+}
+
+/// Minify `d` with optional coordinate rounding. Failed precision rewrites
+/// fall back to the lossless pass (dest-count / glue / bbox still apply).
+pub fn minify_path_d_with(d: &str, precision: Option<u8>) -> Option<String> {
+    if precision.is_some() {
+        if let Some(out) = minify_path_d_attempt(d, precision) {
+            return Some(out);
+        }
+    }
+    minify_path_d_attempt(d, None)
+}
+
+fn minify_path_d_attempt(d: &str, precision: Option<u8>) -> Option<String> {
     let atoms = parse_path(d)?;
     if atoms.is_empty() {
         return Some(String::new());
     }
-    let abs = to_abs(&atoms);
+    let mut abs = to_abs(&atoms);
     let orig_pts = dest_point_count(&abs);
     let orig_bbox = path_bbox(&abs);
+    if let Some(p) = precision {
+        round_abs(&mut abs, i32::from(p));
+    }
     let opt = optimize_abs(abs);
     if orig_pts >= 8 && dest_point_count(&opt) <= 3 {
         return None;
@@ -1626,6 +1686,65 @@ fn dest_point_count(atoms: &[Abs]) -> usize {
     atoms.iter().filter(|a| !matches!(a, Abs::Close)).count()
 }
 
+fn round_prec(n: f64, prec: i32) -> f64 {
+    if !n.is_finite() {
+        return 0.0;
+    }
+    let f = 10f64.powi(prec);
+    (n * f).round() / f
+}
+
+fn round_abs(atoms: &mut [Abs], prec: i32) {
+    let r = |n: f64| round_prec(n, prec);
+    for a in atoms {
+        match a {
+            Abs::Move { x, y } | Abs::Line { x, y } | Abs::SmoothQ { x, y } => {
+                *x = r(*x);
+                *y = r(*y);
+            }
+            Abs::H { x } => *x = r(*x),
+            Abs::V { y } => *y = r(*y),
+            Abs::Cubic {
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            } => {
+                *x1 = r(*x1);
+                *y1 = r(*y1);
+                *x2 = r(*x2);
+                *y2 = r(*y2);
+                *x = r(*x);
+                *y = r(*y);
+            }
+            Abs::SmoothC { x2, y2, x, y } => {
+                *x2 = r(*x2);
+                *y2 = r(*y2);
+                *x = r(*x);
+                *y = r(*y);
+            }
+            Abs::Quad { x1, y1, x, y } => {
+                *x1 = r(*x1);
+                *y1 = r(*y1);
+                *x = r(*x);
+                *y = r(*y);
+            }
+            Abs::Arc {
+                rx, ry, rot, x, y, ..
+            } => {
+                *rx = r(*rx);
+                *ry = r(*ry);
+                *rot = r(*rot);
+                *x = r(*x);
+                *y = r(*y);
+            }
+            Abs::Close => {}
+        }
+    }
+}
+
 fn bbox_compatible(a: Option<(f64, f64, f64, f64)>, b: Option<(f64, f64, f64, f64)>) -> bool {
     match (a, b) {
         (None, None) => true,
@@ -1691,6 +1810,524 @@ fn bbox_close(a: (f64, f64, f64, f64), b: (f64, f64, f64, f64)) -> bool {
         && (a.1 - b.1).abs() <= tol
         && (a.2 - b.2).abs() <= tol
         && (a.3 - b.3).abs() <= tol
+}
+
+/// Collapse `translate` / `scale` / `matrix` to a shorter equivalent.
+/// Skips SMIL-animated transforms. Does **not** bake into path `d`.
+pub fn convert_transform(doc: &mut Document) {
+    convert_transform_with(doc, None);
+}
+
+/// Like [`convert_transform`], with optional component rounding.
+pub fn convert_transform_with(doc: &mut Document, precision: Option<u8>) {
+    let locked = collect_smil_locked_transform_ids(&doc.nodes);
+    convert_transform_in(&mut doc.nodes, &locked, precision);
+}
+
+/// Minify one transform list. `Some("")` is identity (drop the attr).
+/// `None` if the list cannot be parsed safely.
+pub fn minify_transform(raw: &str) -> Option<String> {
+    minify_transform_with(raw, None)
+}
+
+/// Like [`minify_transform`], with optional component rounding.
+pub fn minify_transform_with(raw: &str, precision: Option<u8>) -> Option<String> {
+    let parsed = parse_transform_list(raw)?;
+    let mut list: Vec<Tf> = parsed
+        .into_iter()
+        .filter(|tf| !tf_is_identity(tf, precision))
+        .collect();
+    collapse_adjacent_matrices(&mut list);
+    Some(emit_transform_list(&list, precision))
+}
+
+fn convert_transform_in(nodes: &mut [Node], locked: &HashSet<String>, precision: Option<u8>) {
+    for node in nodes.iter_mut() {
+        let Node::Element(el) = node else {
+            continue;
+        };
+        if is_smil_tag(el.local_name()) {
+            convert_transform_in(&mut el.children, locked, precision);
+            continue;
+        }
+        let id_locked = el.attr("id").is_some_and(|id| locked.contains(id));
+        if !id_locked && !element_has_transform_smil_child(el) {
+            let keys: Vec<String> = el
+                .attrs
+                .iter()
+                .filter(|(k, _)| is_transform_attr_name(k))
+                .map(|(k, _)| k.clone())
+                .collect();
+            for k in keys {
+                let Some(v) = el.attr(&k).map(str::to_string) else {
+                    continue;
+                };
+                let Some(next) = minify_transform_with(&v, precision) else {
+                    continue;
+                };
+                if next.is_empty() {
+                    el.remove_attr(&k);
+                } else if next.len() < v.len() {
+                    el.set_attr(&k, next);
+                }
+            }
+        }
+        convert_transform_in(&mut el.children, locked, precision);
+    }
+}
+
+fn is_transform_attr_name(name: &str) -> bool {
+    let local = name.rsplit_once(':').map(|(_, l)| l).unwrap_or(name);
+    local.eq_ignore_ascii_case("transform")
+        || local.eq_ignore_ascii_case("gradientTransform")
+        || local.eq_ignore_ascii_case("patternTransform")
+}
+
+fn collect_smil_locked_transform_ids(nodes: &[Node]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    walk_smil_transform_locks(nodes, &mut out);
+    out
+}
+
+fn walk_smil_transform_locks(nodes: &[Node], out: &mut HashSet<String>) {
+    for node in nodes {
+        let Node::Element(el) = node else {
+            continue;
+        };
+        if locks_transform_target(el) {
+            for key in ["href", "xlink:href"] {
+                if let Some(v) = el.attr(key) {
+                    if let Some(id) = v.strip_prefix('#') {
+                        if !id.is_empty() {
+                            out.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        walk_smil_transform_locks(&el.children, out);
+    }
+}
+
+fn element_has_transform_smil_child(el: &Element) -> bool {
+    el.children.iter().any(|n| match n {
+        Node::Element(child) => locks_transform_target(child),
+        _ => false,
+    })
+}
+
+fn locks_transform_target(el: &Element) -> bool {
+    let local = el.local_name();
+    if local.eq_ignore_ascii_case("animatetransform") || local.eq_ignore_ascii_case("animatemotion")
+    {
+        return true;
+    }
+    is_smil_tag(local) && attr_is_transform_name(el.attr("attributeName"))
+}
+
+fn attr_is_transform_name(v: Option<&str>) -> bool {
+    v.is_some_and(|s| {
+        let s = s.trim();
+        s.eq_ignore_ascii_case("transform")
+            || s.eq_ignore_ascii_case("gradientTransform")
+            || s.eq_ignore_ascii_case("patternTransform")
+    })
+}
+
+#[derive(Clone, Copy, Debug)]
+struct M {
+    a: f64,
+    b: f64,
+    c: f64,
+    d: f64,
+    e: f64,
+    f: f64,
+}
+
+impl M {
+    fn translate(x: f64, y: f64) -> Self {
+        Self {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            e: x,
+            f: y,
+        }
+    }
+
+    fn scale(x: f64, y: f64) -> Self {
+        Self {
+            a: x,
+            b: 0.0,
+            c: 0.0,
+            d: y,
+            e: 0.0,
+            f: 0.0,
+        }
+    }
+
+    fn mul(self, o: Self) -> Self {
+        Self {
+            a: self.a * o.a + self.c * o.b,
+            b: self.b * o.a + self.d * o.b,
+            c: self.a * o.c + self.c * o.d,
+            d: self.b * o.c + self.d * o.d,
+            e: self.a * o.e + self.c * o.f + self.e,
+            f: self.b * o.e + self.d * o.f + self.f,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Tf {
+    Matrix(M),
+    Rotate { a: f64, cxy: Option<(f64, f64)> },
+    SkewX(f64),
+    SkewY(f64),
+}
+
+fn parse_transform_list(s: &str) -> Option<Vec<Tf>> {
+    let t = s.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("none") {
+        return Some(Vec::new());
+    }
+    let b = t.as_bytes();
+    let mut i = 0usize;
+    let mut out = Vec::new();
+    loop {
+        skip_tf_sep(b, &mut i);
+        if i >= b.len() {
+            break;
+        }
+        let start = i;
+        while i < b.len() && b[i].is_ascii_alphabetic() {
+            i += 1;
+        }
+        if start == i {
+            return None;
+        }
+        let name = t[start..i].to_ascii_lowercase();
+        skip_tf_wsp(b, &mut i);
+        if i >= b.len() || b[i] != b'(' {
+            return None;
+        }
+        i += 1;
+        let mut nums = Vec::new();
+        loop {
+            skip_tf_sep(b, &mut i);
+            if i >= b.len() {
+                return None;
+            }
+            if b[i] == b')' {
+                i += 1;
+                break;
+            }
+            if !is_tf_num_start(b[i]) {
+                return None;
+            }
+            nums.push(parse_tf_number(b, &mut i)?);
+            if i < b.len() && b[i].is_ascii_alphabetic() {
+                return None;
+            }
+        }
+        out.push(tf_from_fn(&name, &nums)?);
+    }
+    Some(out)
+}
+
+fn skip_tf_wsp(b: &[u8], i: &mut usize) {
+    while *i < b.len() && matches!(b[*i], b' ' | b'\t' | b'\n' | b'\r') {
+        *i += 1;
+    }
+}
+
+fn skip_tf_sep(b: &[u8], i: &mut usize) {
+    while *i < b.len() && matches!(b[*i], b' ' | b'\t' | b'\n' | b'\r' | b',') {
+        *i += 1;
+    }
+}
+
+fn is_tf_num_start(c: u8) -> bool {
+    c.is_ascii_digit() || matches!(c, b'+' | b'-' | b'.')
+}
+
+fn parse_tf_number(b: &[u8], i: &mut usize) -> Option<f64> {
+    let start = *i;
+    if *i < b.len() && matches!(b[*i], b'+' | b'-') {
+        *i += 1;
+    }
+    let mut saw_digit = false;
+    while *i < b.len() && b[*i].is_ascii_digit() {
+        saw_digit = true;
+        *i += 1;
+    }
+    if *i < b.len() && b[*i] == b'.' {
+        *i += 1;
+        while *i < b.len() && b[*i].is_ascii_digit() {
+            saw_digit = true;
+            *i += 1;
+        }
+    }
+    if *i < b.len() && matches!(b[*i], b'e' | b'E') {
+        let e = *i;
+        *i += 1;
+        if *i < b.len() && matches!(b[*i], b'+' | b'-') {
+            *i += 1;
+        }
+        let exp = *i;
+        while *i < b.len() && b[*i].is_ascii_digit() {
+            *i += 1;
+        }
+        if *i == exp {
+            *i = e;
+        }
+    }
+    if !saw_digit || start == *i {
+        return None;
+    }
+    let s = std::str::from_utf8(&b[start..*i]).ok()?;
+    let n: f64 = s.parse().ok()?;
+    n.is_finite().then_some(n)
+}
+
+fn tf_from_fn(name: &str, n: &[f64]) -> Option<Tf> {
+    match name {
+        "matrix" if n.len() == 6 => Some(Tf::Matrix(M {
+            a: n[0],
+            b: n[1],
+            c: n[2],
+            d: n[3],
+            e: n[4],
+            f: n[5],
+        })),
+        "translate" if n.len() == 1 => Some(Tf::Matrix(M::translate(n[0], 0.0))),
+        "translate" if n.len() == 2 => Some(Tf::Matrix(M::translate(n[0], n[1]))),
+        "scale" if n.len() == 1 => Some(Tf::Matrix(M::scale(n[0], n[0]))),
+        "scale" if n.len() == 2 => Some(Tf::Matrix(M::scale(n[0], n[1]))),
+        "rotate" if n.len() == 1 => Some(Tf::Rotate { a: n[0], cxy: None }),
+        "rotate" if n.len() == 3 => Some(Tf::Rotate {
+            a: n[0],
+            cxy: Some((n[1], n[2])),
+        }),
+        "skewx" if n.len() == 1 => Some(Tf::SkewX(n[0])),
+        "skewy" if n.len() == 1 => Some(Tf::SkewY(n[0])),
+        _ => None,
+    }
+}
+
+fn collapse_adjacent_matrices(list: &mut Vec<Tf>) {
+    let mut i = 0;
+    while i + 1 < list.len() {
+        match (list[i], list[i + 1]) {
+            (Tf::Matrix(a), Tf::Matrix(b)) => {
+                list[i] = Tf::Matrix(a.mul(b));
+                list.remove(i + 1);
+            }
+            _ => i += 1,
+        }
+    }
+}
+
+fn tf_is_identity(tf: &Tf, precision: Option<u8>) -> bool {
+    match *tf {
+        Tf::Matrix(m) => matrix_is_identity(&m, precision),
+        Tf::Rotate { a, .. } => tf_near0(tf_snap(a, precision)),
+        Tf::SkewX(a) | Tf::SkewY(a) => tf_near0(tf_snap(a, precision)),
+    }
+}
+
+fn matrix_is_identity(m: &M, precision: Option<u8>) -> bool {
+    tf_near(tf_snap(m.a, precision), 1.0)
+        && tf_near0(tf_snap(m.b, precision))
+        && tf_near0(tf_snap(m.c, precision))
+        && tf_near(tf_snap(m.d, precision), 1.0)
+        && tf_near0(tf_snap(m.e, precision))
+        && tf_near0(tf_snap(m.f, precision))
+}
+
+fn emit_transform_list(list: &[Tf], precision: Option<u8>) -> String {
+    let mut out = String::new();
+    for tf in list {
+        out.push_str(&emit_tf(tf, precision));
+    }
+    out
+}
+
+fn emit_tf(tf: &Tf, precision: Option<u8>) -> String {
+    match *tf {
+        Tf::Matrix(m) => emit_matrix_shortest(&m, precision),
+        Tf::Rotate { a, cxy } => {
+            let a = tf_snap(a, precision);
+            if tf_near0(a) {
+                return String::new();
+            }
+            match cxy {
+                Some((cx, cy)) => {
+                    let cx = tf_snap(cx, precision);
+                    let cy = tf_snap(cy, precision);
+                    if tf_near0(cx) && tf_near0(cy) {
+                        emit_call("rotate", &[a], precision)
+                    } else {
+                        emit_call("rotate", &[a, cx, cy], precision)
+                    }
+                }
+                None => emit_call("rotate", &[a], precision),
+            }
+        }
+        Tf::SkewX(a) => {
+            let a = tf_snap(a, precision);
+            if tf_near0(a) {
+                String::new()
+            } else {
+                emit_call("skewX", &[a], precision)
+            }
+        }
+        Tf::SkewY(a) => {
+            let a = tf_snap(a, precision);
+            if tf_near0(a) {
+                String::new()
+            } else {
+                emit_call("skewY", &[a], precision)
+            }
+        }
+    }
+}
+
+fn emit_matrix_shortest(m: &M, precision: Option<u8>) -> String {
+    let a = tf_snap(m.a, precision);
+    let b = tf_snap(m.b, precision);
+    let c = tf_snap(m.c, precision);
+    let d = tf_snap(m.d, precision);
+    let e = tf_snap(m.e, precision);
+    let f = tf_snap(m.f, precision);
+    if tf_near(a, 1.0)
+        && tf_near0(b)
+        && tf_near0(c)
+        && tf_near(d, 1.0)
+        && tf_near0(e)
+        && tf_near0(f)
+    {
+        return String::new();
+    }
+    let mx = emit_call("matrix", &[a, b, c, d, e, f], precision);
+    if !tf_near0(b) || !tf_near0(c) {
+        return mx;
+    }
+    let mut best = mx;
+    if tf_near(a, 1.0) && tf_near(d, 1.0) {
+        keep_shorter(&mut best, emit_translate(e, f, precision));
+    } else if tf_near0(e) && tf_near0(f) {
+        keep_shorter(&mut best, emit_scale(a, d, precision));
+    } else {
+        let ts = format!(
+            "{}{}",
+            emit_translate(e, f, precision),
+            emit_scale(a, d, precision)
+        );
+        keep_shorter(&mut best, ts);
+        if !tf_near0(a) && !tf_near0(d) {
+            let st = format!(
+                "{}{}",
+                emit_scale(a, d, precision),
+                emit_translate(e / a, f / d, precision)
+            );
+            keep_shorter(&mut best, st);
+        }
+    }
+    best
+}
+
+fn emit_translate(x: f64, y: f64, precision: Option<u8>) -> String {
+    if tf_near0(x) && tf_near0(y) {
+        return String::new();
+    }
+    if tf_near0(y) {
+        emit_call("translate", &[x], precision)
+    } else {
+        emit_call("translate", &[x, y], precision)
+    }
+}
+
+fn emit_scale(x: f64, y: f64, precision: Option<u8>) -> String {
+    if tf_near(x, 1.0) && tf_near(y, 1.0) {
+        return String::new();
+    }
+    if tf_near(x, y) {
+        emit_call("scale", &[x], precision)
+    } else {
+        emit_call("scale", &[x, y], precision)
+    }
+}
+
+fn keep_shorter(best: &mut String, cand: String) {
+    if cand.is_empty() {
+        return;
+    }
+    if cand.len() < best.len() {
+        *best = cand;
+    }
+}
+
+fn emit_call(name: &str, args: &[f64], precision: Option<u8>) -> String {
+    let mut s = String::from(name);
+    s.push('(');
+    for (i, n) in args.iter().enumerate() {
+        let tok = emit_tf_num(*n, precision);
+        if i > 0 && tf_needs_sep(&s, &tok) {
+            s.push(' ');
+        }
+        s.push_str(&tok);
+    }
+    s.push(')');
+    s
+}
+
+fn emit_tf_num(n: f64, precision: Option<u8>) -> String {
+    let n = tf_snap(n, precision);
+    let n = if n == 0.0 { 0.0 } else { n };
+    minify_number_lexeme(&fmt_f64(n))
+}
+
+fn tf_needs_sep(out: &str, next: &str) -> bool {
+    let Some(prev) = out.chars().next_back() else {
+        return false;
+    };
+    if next.starts_with('-') {
+        return false;
+    }
+    if next.starts_with('.') {
+        return !prev_token_has_dot(out);
+    }
+    prev.is_ascii_digit() || prev == '.'
+}
+
+fn tf_snap(n: f64, precision: Option<u8>) -> f64 {
+    if !n.is_finite() {
+        return 0.0;
+    }
+    let n = if n == 0.0 { 0.0 } else { n };
+    match precision {
+        Some(p) => {
+            let f = 10f64.powi(i32::from(p));
+            (n * f).round() / f
+        }
+        None => {
+            if n.abs() < 1e-8 {
+                0.0
+            } else {
+                n
+            }
+        }
+    }
+}
+
+fn tf_near0(n: f64) -> bool {
+    n.abs() < 1e-8
+}
+
+fn tf_near(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-8
 }
 
 fn collect_smil_locked_d_ids(nodes: &[Node]) -> HashSet<String> {
@@ -2117,6 +2754,7 @@ mod tests {
     fn plugin_name_is_svgo_camel_case() {
         assert!(PATH_PLUGIN_NAMES.contains(&"convertPathData"));
         assert!(PATH_PLUGIN_NAMES.contains(&"convertShapeToPath"));
+        assert!(PATH_PLUGIN_NAMES.contains(&"convertTransform"));
         assert!(PATH_PLUGIN_NAMES.contains(&"mergePaths"));
     }
 
@@ -2158,6 +2796,29 @@ mod tests {
     }
 
     #[test]
+    fn minify_precision_2_vs_3_keeps_dest_count() {
+        let d = "M 1.23456 2.34567 C 3.45678 4.56789 5.67891 6.78901 7.89012 8.90123 C 1.11111 2.22222 3.33333 4.44444 5.55555 6.66666";
+        let orig = dest_point_count(&to_abs(&parse_path(d).unwrap()));
+        let a = minify_path_d_with(d, Some(2)).expect("prec 2");
+        let b = minify_path_d_with(d, Some(3)).expect("prec 3");
+        assert!(
+            !a.contains("014.1912") && !b.contains("014.1912"),
+            "{a} / {b}"
+        );
+        assert_eq!(
+            dest_point_count(&to_abs(&parse_path(&a).unwrap())),
+            orig,
+            "prec2 dests: {a}"
+        );
+        assert_eq!(
+            dest_point_count(&to_abs(&parse_path(&b).unwrap())),
+            orig,
+            "prec3 dests: {b}"
+        );
+        assert!(a.len() <= b.len(), "prec2 {a} longer than prec3 {b}");
+    }
+
+    #[test]
     fn minify_ocean_rect_cubics_keep_four_sides() {
         // Tiny stand-in for the world-map ocean: a rectangle drawn as four
         // axis-aligned cubics. A smashed `d` becomes a 2–3 point triangle.
@@ -2176,5 +2837,129 @@ mod tests {
         let (x0, y0, x1, y1) = path_bbox(&got).unwrap();
         assert!((x0 - 40.0).abs() < 0.5 && (x1 - 100.0).abs() < 0.5, "{out}");
         assert!((y0 - 80.0).abs() < 0.5 && (y1 - 200.0).abs() < 0.5, "{out}");
+    }
+
+    #[test]
+    fn minify_transform_shortens_translate_scale_matrix() {
+        assert_eq!(
+            minify_transform("translate(10, 0)").as_deref(),
+            Some("translate(10)")
+        );
+        assert_eq!(minify_transform("scale(2, 2)").as_deref(), Some("scale(2)"));
+        assert_eq!(
+            minify_transform("matrix(1,0,0,1,10,20)").as_deref(),
+            Some("translate(10 20)")
+        );
+        assert_eq!(
+            minify_transform("matrix(2 0 0 2 0 0)").as_deref(),
+            Some("scale(2)")
+        );
+        assert_eq!(minify_transform("matrix(1 0 0 1 0 0)").as_deref(), Some(""));
+        assert_eq!(
+            minify_transform("translate(10) translate(5)").as_deref(),
+            Some("translate(15)")
+        );
+        assert_eq!(
+            minify_transform("translate(10.000, 20.000)").as_deref(),
+            Some("translate(10 20)")
+        );
+        assert_eq!(minify_transform("none").as_deref(), Some(""));
+        assert!(minify_transform("translate(10px)").is_none());
+        let mixed = minify_transform("translate(10) rotate(45)").unwrap();
+        assert!(mixed.contains("translate(10)"), "{mixed}");
+        assert!(mixed.contains("rotate(45)"), "{mixed}");
+        assert!(
+            !mixed.contains("matrix"),
+            "must not collapse across rotate: {mixed}"
+        );
+    }
+
+    #[test]
+    fn convert_transform_does_not_bake_into_path() {
+        let d = "M0 0C80 200 60 200 40 200";
+        let mut doc = doc_svg(vec![node(
+            "g",
+            &[("transform", "translate(10.000, 0.000)")],
+            vec![node("path", &[("d", d)], vec![])],
+        )]);
+        convert_transform(&mut doc);
+        assert_eq!(
+            first_attr(&doc, "g", "transform").as_deref(),
+            Some("translate(10)")
+        );
+        assert_eq!(first_attr(&doc, "path", "d").as_deref(), Some(d));
+    }
+
+    #[test]
+    fn convert_transform_skips_animatetransform() {
+        let mut doc = doc_svg(vec![node(
+            "g",
+            &[("id", "spin"), ("transform", "translate(10.000, 0.000)")],
+            vec![
+                node(
+                    "animateTransform",
+                    &[
+                        ("attributeName", "transform"),
+                        ("type", "translate"),
+                        ("from", "10 0"),
+                        ("to", "20 0"),
+                    ],
+                    vec![],
+                ),
+                node("path", &[("d", "M0 0h2")], vec![]),
+            ],
+        )]);
+        convert_transform(&mut doc);
+        assert_eq!(
+            first_attr(&doc, "g", "transform").as_deref(),
+            Some("translate(10.000, 0.000)")
+        );
+    }
+
+    #[test]
+    fn convert_transform_skips_href_animatetransform() {
+        let mut doc = doc_svg(vec![
+            node(
+                "g",
+                &[("id", "pin"), ("transform", "scale(2.000, 2.000)")],
+                vec![node("circle", &[("r", "1")], vec![])],
+            ),
+            node(
+                "animateTransform",
+                &[
+                    ("href", "#pin"),
+                    ("attributeName", "transform"),
+                    ("type", "scale"),
+                ],
+                vec![],
+            ),
+        ]);
+        convert_transform(&mut doc);
+        assert_eq!(
+            first_attr(&doc, "g", "transform").as_deref(),
+            Some("scale(2.000, 2.000)")
+        );
+    }
+
+    #[test]
+    fn convert_transform_drops_identity_and_shortens_gradient() {
+        let mut doc = doc_svg(vec![
+            node(
+                "g",
+                &[("transform", "matrix(1,0,0,1,0,0)")],
+                vec![node("rect", &[("width", "1"), ("height", "1")], vec![])],
+            ),
+            node(
+                "linearGradient",
+                &[("id", "g"), ("gradientTransform", "matrix(1 0 0 1 4 0)")],
+                vec![],
+            ),
+        ]);
+        convert_transform(&mut doc);
+        assert!(first_attr(&doc, "g", "transform").is_none());
+        assert_eq!(
+            first_attr(&doc, "linearGradient", "gradientTransform").as_deref(),
+            Some("translate(4)")
+        );
     }
 }

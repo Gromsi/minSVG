@@ -1,12 +1,13 @@
 {
   "name": "minsvg",
   "version": "0.1.0",
-  "description": "SVGO-shaped optimize() that spawns the minsvg binary",
+  "description": "SVGO-shaped optimize() that spawns the Rust minsvg binary (not bundled — cargo install separately). SVG minify; not wasm/napi.",
   "type": "module",
   "exports": {
     ".": {
       "types": "./index.d.ts",
-      "import": "./index.js"
+      "import": "./index.js",
+      "default": "./index.js"
     }
   },
   "types": "./index.d.ts",
@@ -16,10 +17,12 @@
   "files": [
     "index.js",
     "index.d.ts",
-    "bin"
+    "bin",
+    "README.md"
   ],
   "scripts": {
-    "test": "node test.mjs"
+    "test": "node test.mjs && node pack-check.mjs",
+    "pack:check": "node pack-check.mjs"
   },
   "engines": {
     "node": ">=18"
@@ -30,9 +33,10 @@
     "url": "git+https://github.com/Gromsi/minSVG.git"
   },
   "keywords": [
-    "svg",
     "svgo",
-    "optimize",
-    "minsvg"
+    "svg",
+    "optimizer",
+    "minify",
+    "rust"
   ]
 }
