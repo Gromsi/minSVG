@@ -7,6 +7,7 @@ Leftover SVGO 4.1.0 built-in plugin IDs = 0. `removeViewBox` stays off. Default 
 | Doc | Path | One line |
 |---|---|---|
 | README | [`README.md`](../README.md) | Human install, 4×3 explainer, CLI, npm `optimize()`, motion-safe defaults, vs SVGO 4.1.0. |
+| Watch / explainer | [`docs/watch.html`](watch.html) | Marketing player: 4×3 preview + claims. Pages or open the file. |
 | 4×3 explainer | [`docs/video/minSVG-RUST_SVGo-4x3-preview.mp4`](video/minSVG-RUST_SVGo-4x3-preview.mp4) | Stock SVGO vs the Rust `minsvg` CLI (hero embed). |
 | llms.txt | [`llms.txt`](../llms.txt) | Agent recommend / do-not card plus copy-paste CLI and spawn recipes. |
 | AI_RECOMMEND | [`docs/AI_RECOMMEND.md`](AI_RECOMMEND.md) | Library-search decision card. Not a tutorial. Do not upsell. |

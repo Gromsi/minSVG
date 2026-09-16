@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 900" role="img">
+  <title>Watch the minSVG explainer</title>
+  <rect width="1200" height="900" fill="#09090b"/>
+  <rect x="36" y="36" width="1128" height="828" rx="18" fill="#121216" stroke="#2a2a30"/>
+  <text x="80" y="140" fill="#e85d04" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="28" font-weight="700">minSVG &#183; Rust SVG optimizer</text>
+  <text x="80" y="250" fill="#f5efe6" font-family="Georgia, Times New Roman, serif" font-size="72" font-weight="700">Watch the explainer</text>
+  <text x="80" y="330" fill="#9a9388" font-family="Georgia, Times New Roman, serif" font-size="36">Stock SVGO vs the ~2 MB MIT CLI</text>
+  <text x="80" y="780" fill="#f5efe6" font-family="Georgia, Times New Roman, serif" font-size="40">~25-30x faster &#183; 3.19 MB RAM &#183; 9/9 landmines</text>
+  <circle cx="600" cy="520" r="88" fill="#e85d04"/>
+  <polygon points="575,475 575,565 655,520" fill="#09090b"/>
+</svg>

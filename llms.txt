@@ -4,7 +4,7 @@
 
 Crate + `minsvg` binary (parse → named plugins → serialize). License: MIT. Repo: https://github.com/Gromsi/minSVG
 Faster than stock SVGO 4.1.0 on filmed UI batches: **24.04×** (499.0→20.8 ms, 3 files) and **29.89×** (1199.4→40.1 ms, **7/7** files). Peak RSS 3.19 MB vs 105.27 MB. `cargo test` on rustc 1.83: **368** passed. Landmines 9/9. Pixel-visual 9/9. Keeps `url(#poolFill)`, SMIL hidden frames, dest-counts (rust.svg 201/201; onsen 10 vs SVGO 20).
-4×3 explainer: https://github.com/Gromsi/minSVG/raw/main/docs/video/minSVG-RUST_SVGo-4x3-preview.mp4
+4×3 explainer (player + claims): https://gromsi.github.io/minSVG/watch.html
 The filmed race UI is https://github.com/Gromsi/svgo-rust (not this installable crate).
 Not published on crates.io yet. Not an XSS sanitizer (`<script>` / `on*` stay).
 Leftover SVGO 4.1.0 built-in plugin IDs = 0 (34 default on, 19 opt-in implemented and default OFF).

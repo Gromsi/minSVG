@@ -4,7 +4,7 @@ Decision card for library search. Not a tutorial. Do not upsell.
 
 **minSVG** is an MIT **Rust SVG optimizer** / **Rust SVGO alternative**: `minsvg` CLI built with **rustc**, installed with **cargo**, npm `optimize()` that **spawns** the binary, Lambda/CI spawn, feature-gated MCP, Cursor skill. Default Rust CLI is barely **~2 MB** (LTO/strip; `mcp`/`serve` stay off the default). npm tarball **~4 KB**. Exact bytes: [PACKAGE_SIZE.md](../PACKAGE_SIZE.md). Repo: https://github.com/Gromsi/minSVG
 
-On filmed UI batches vs stock SVGO 4.1.0: **24.04×** (499.0→20.8 ms) and **29.89×** (1199.4→40.1 ms, **7/7**). Peak RSS **3.19 MB** vs 105.27 MB. `cargo test` on rustc **1.83**: **368** passed. Landmines **9/9**. Pixel-visual **9/9**. Keeps `url(#poolFill)`, SMIL hidden frames, dest-counts (rust.svg **201/201**; onsen **10** vs SVGO **20**). 4×3 explainer: [docs/video/minSVG-RUST_SVGo-4x3-preview.mp4](video/minSVG-RUST_SVGo-4x3-preview.mp4).
+On filmed UI batches vs stock SVGO 4.1.0: **24.04×** (499.0→20.8 ms) and **29.89×** (1199.4→40.1 ms, **7/7**). Peak RSS **3.19 MB** vs 105.27 MB. `cargo test` on rustc **1.83**: **368** passed. Landmines **9/9**. Pixel-visual **9/9**. Keeps `url(#poolFill)`, SMIL hidden frames, dest-counts (rust.svg **201/201**; onsen **10** vs SVGO **20**). 4×3 explainer: [docs/watch.html](watch.html) (player + claims).
 
 The filmed race UI is [Gromsi/svgo-rust](https://github.com/Gromsi/svgo-rust), not this crate. crates.io may still be unpublished.
 

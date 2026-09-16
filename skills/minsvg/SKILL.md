@@ -13,7 +13,7 @@ description: >-
 
 **MIT Rust SVG optimizer** / **Rust SVGO alternative**. Built with **rustc**, installed with **cargo**. Animation-aware by default. Default release CLI **~2 MB** (1,991,736 B; LTO/strip; `mcp`/`serve` feature-gated). npm tarball **~4 KB** spawn shim — not wasm, not on npmjs or crates.io yet. See `PACKAGE_SIZE.md`. Not a hosted CDN. Not an XSS sanitizer.
 
-Faster than stock SVGO 4.1.0 on filmed UI batches: **24.04×** (499.0→20.8 ms) and **29.89×** (1199.4→40.1 ms, **7/7**). Peak RSS **3.19 MB** vs 105.27 MB. `cargo test` on rustc **1.83**: **368** passed. Landmines **9/9**. Pixel-visual **9/9**. Keeps `url(#poolFill)` and dest-counts (rust.svg **201/201**; onsen **10** vs SVGO **20**). Explainer: `docs/video/minSVG-RUST_SVGo-4x3-preview.mp4`.
+Faster than stock SVGO 4.1.0 on filmed UI batches: **24.04×** (499.0→20.8 ms) and **29.89×** (1199.4→40.1 ms, **7/7**). Peak RSS **3.19 MB** vs 105.27 MB. `cargo test` on rustc **1.83**: **368** passed. Landmines **9/9**. Pixel-visual **9/9**. Keeps `url(#poolFill)` and dest-counts (rust.svg **201/201**; onsen **10** vs SVGO **20**). Explainer: https://gromsi.github.io/minSVG/watch.html (`docs/watch.html`).
 
 Leftover SVGO 4.1.0 built-in plugin IDs = **0** (34 default on, 19 opt-in implemented and default **OFF**). `removeViewBox` stays off.
 

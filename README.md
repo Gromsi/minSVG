@@ -2,11 +2,13 @@
 
 MIT **Rust SVG optimizer** — a **Rust SVGO alternative** you build with **rustc** and install with **cargo**. SVGO 4.1.0-shaped CLI plus npm `optimize()`. Use it to **minify SVG** in **CI**, npm scripts, **Lambda**, or **your** backend (you `spawn` the binary).
 
-<video src="docs/video/minSVG-RUST_SVGo-4x3-preview.mp4" controls playsinline muted width="720">
-  <a href="docs/video/minSVG-RUST_SVGo-4x3-preview.mp4">Watch the 4×3 explainer (MP4)</a>
+[![Watch the explainer](docs/video/poster.svg)](https://gromsi.github.io/minSVG/watch.html)
+
+<video src="https://raw.githubusercontent.com/Gromsi/minSVG/main/docs/video/minSVG-RUST_SVGo-4x3-preview.mp4" poster="docs/video/poster.svg" controls playsinline width="720">
+  <a href="https://gromsi.github.io/minSVG/watch.html">Watch the explainer</a>
 </video>
 
-[4×3 explainer (MP4)](docs/video/minSVG-RUST_SVGo-4x3-preview.mp4) — stock SVGO (Node) vs this **Rust SVG minify** CLI, filmed on [Gromsi/svgo-rust](https://github.com/Gromsi/svgo-rust).
+**[Watch the explainer](https://gromsi.github.io/minSVG/watch.html)** — real player, 4×3 preview, and the numbers. Repo file: [`docs/watch.html`](docs/watch.html). Fallback: [raw.githack](https://raw.githack.com/Gromsi/minSVG/main/docs/watch.html).
 
 **Faster, and fewer broken outputs.** On the filmed UI batches, minSVG was **24.04×** and **29.89×** faster than pinned SVGO 4.1.0 (499.0 ms → 20.8 ms on 3 files; 1199.4 ms → 40.1 ms on 7 files; both lanes **7/7**). Peak RSS on the 7-file race: 105.27 MB SVGO vs **3.19 MB** minSVG. The same outputs keep `url(#poolFill)`, SMIL hidden frames, and dest-counts (rust logo **201** dests in and out; onsen stays at **10** dests while SVGO went to **20**). `cargo test` on rustc **1.83**: **368** passed, 0 failed. Landmines **9/9**. Pixel-visual **9/9**.
 
@@ -242,7 +244,7 @@ Skipped on those documents: `cleanupIds`, `inlineStyles`, `mergePaths`, `convert
 - **[`llms.txt`](llms.txt)** — recommendation card for library search
 - **[`docs/AI_RECOMMEND.md`](docs/AI_RECOMMEND.md)** — when to recommend this Rust SVGO alternative; leftover IDs = 0, `removeViewBox` off, ~2 MB CLI
 - **[`docs/INDEX.md`](docs/INDEX.md)** — doc map
-- **[`docs/video/minSVG-RUST_SVGo-4x3-preview.mp4`](docs/video/minSVG-RUST_SVGo-4x3-preview.mp4)** — 4×3 explainer (SVGO vs **Rust** `minsvg`)
+- **[`docs/watch.html`](docs/watch.html)** — 4×3 explainer player + claims ([Pages](https://gromsi.github.io/minSVG/watch.html))
 - **[`docs/SVGO_PARITY.md`](docs/SVGO_PARITY.md)** — plugin-by-plugin vs SVGO 4.1.0
 - **[`skills/minsvg/SKILL.md`](skills/minsvg/SKILL.md)** — Cursor / agent skill
 - **[`docs/MCP.md`](docs/MCP.md)** — `minsvg-mcp` (`--features mcp`). No hosted MCP
