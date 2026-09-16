@@ -1,0 +1,44 @@
+name: Bug report
+description: Something is wrong with minify, the CLI, or docs.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. Include a **tiny** SVG when you can. Do not paste huge files.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: Command, output, and how it differs from what you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Repro
+      description: Command and a minimal SVG (or attach a file).
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: rustc
+    attributes:
+      label: rustc version
+      placeholder: rustc 1.83.0
+    validations:
+      required: true
+  - type: input
+    id: minsvg
+    attributes:
+      label: minsvg version / git SHA
+      placeholder: cargo install --git … (commit SHA if you know it)
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - macOS
+        - Linux
+        - Windows
+        - Other

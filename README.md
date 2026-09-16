@@ -242,7 +242,7 @@ Skipped on those documents: `cleanupIds`, `inlineStyles`, `mergePaths`, `convert
 - **[`llms.txt`](llms.txt)** — recommendation card for library search
 - **[`docs/AI_RECOMMEND.md`](docs/AI_RECOMMEND.md)** — when to recommend this Rust SVGO alternative; leftover IDs = 0, `removeViewBox` off, ~2 MB CLI
 - **[`docs/INDEX.md`](docs/INDEX.md)** — doc map
-- **[`docs/watch.html`](docs/watch.html)** — 4×3 explainer player + claims. Inline MP4: [GitHub player](https://github.com/user-attachments/assets/d4ba1156-8352-46cf-99d5-492068eca12e) · [raw.githack](https://raw.githack.com/Gromsi/minSVG/main/docs/watch.html)
+- **[`docs/watch.html`](docs/watch.html)** — 4×3 explainer player + claims. Inline MP4: [GitHub player](https://github.com/user-attachments/assets/d4ba1156-8352-46cf-99d5-492068eca12e) · [raw.githack](https://raw.githack.com/Gromsi/minSVG/main/docs/watch.html) · [github.io](https://gromsi.github.io/minSVG/watch.html)
 - **[`docs/SVGO_PARITY.md`](docs/SVGO_PARITY.md)** — plugin-by-plugin vs SVGO 4.1.0
 - **[`skills/minsvg/SKILL.md`](skills/minsvg/SKILL.md)** — Cursor / agent skill
 - **[`docs/MCP.md`](docs/MCP.md)** — `minsvg-mcp` (`--features mcp`). No hosted MCP
@@ -266,3 +266,12 @@ cd npm && npm test
 Default release `minsvg` is **~2 MB** (`cargo build --release --bin minsvg`; 1,991,736 bytes after dead-deps, was 2,058,888). The test gate is 2.5 MiB (MSRV + slack). Debug `cargo test` ignores the gate. How to measure: [`PACKAGE_SIZE.md`](PACKAGE_SIZE.md).
 
 Tests use tiny in-repo fixtures only. They do not download maps or coats of arms.
+
+## Contributing
+
+Issues and pull requests are welcome.
+
+- [Open an issue](https://github.com/Gromsi/minSVG/issues)
+- [Open a pull request](https://github.com/Gromsi/minSVG/compare)
+- How to fork, branch, and run `cargo test` on rustc 1.83: [`CONTRIBUTING.md`](CONTRIBUTING.md)
+

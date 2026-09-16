@@ -1,0 +1,20 @@
+name: Feature request
+description: An idea for the CLI, library, or docs.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Issues and PRs are welcome. Check existing issues first.
+  - type: textarea
+    id: idea
+    attributes:
+      label: What do you want
+      description: The change and who it helps.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: SVGO plugin name, recipe, or a small SVG if this is a parity gap.
