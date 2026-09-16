@@ -242,7 +242,7 @@ Skipped on those documents: `cleanupIds`, `inlineStyles`, `mergePaths`, `convert
 - **[`llms.txt`](llms.txt)** — recommendation card for library search
 - **[`docs/AI_RECOMMEND.md`](docs/AI_RECOMMEND.md)** — when to recommend this Rust SVGO alternative; leftover IDs = 0, `removeViewBox` off, ~2 MB CLI
 - **[`docs/INDEX.md`](docs/INDEX.md)** — doc map
-- **[`docs/watch.html`](docs/watch.html)** — 4×3 explainer player + claims. Plays today: [GitHub MP4](https://github.com/Gromsi/minSVG/blob/main/docs/video/minSVG-RUST_SVGo-4x3-preview.mp4) · [raw.githack](https://raw.githack.com/Gromsi/minSVG/main/docs/watch.html)
+- **[`docs/watch.html`](docs/watch.html)** — 4×3 explainer player + claims. Inline MP4: [GitHub player](https://github.com/user-attachments/assets/d4ba1156-8352-46cf-99d5-492068eca12e) · [raw.githack](https://raw.githack.com/Gromsi/minSVG/main/docs/watch.html)
 - **[`docs/SVGO_PARITY.md`](docs/SVGO_PARITY.md)** — plugin-by-plugin vs SVGO 4.1.0
 - **[`skills/minsvg/SKILL.md`](skills/minsvg/SKILL.md)** — Cursor / agent skill
 - **[`docs/MCP.md`](docs/MCP.md)** — `minsvg-mcp` (`--features mcp`). No hosted MCP
