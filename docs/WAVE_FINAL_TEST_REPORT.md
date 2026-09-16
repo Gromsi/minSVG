@@ -118,4 +118,13 @@ convertStyleToAttrs
 
 ## Tasks 1–40
 
-See [`ROADMAP_40.md`](ROADMAP_40.md). Wave 3 numbers in [`WAVE3_TEST_REPORT.md`](WAVE3_TEST_REPORT.md) were 340 / 360 before Wave 4 binaries (`e2e_all_flags`, `landmines`, `optin_catalog`, `onsen_id_case`, extra smoke, `binary_size` ignore). Playwright bench notes: `svgo-rust/output/scenarios/parity-wave3.md` (3/3 both lanes; onsen `url(#poolFill)` kept; batch wall 499.0 ms SVGO / 20.8 ms minSVG).
+See [`ROADMAP_40.md`](ROADMAP_40.md). Wave 3 numbers in [`WAVE3_TEST_REPORT.md`](WAVE3_TEST_REPORT.md) were 340 / 360 before Wave 4 binaries (`e2e_all_flags`, `landmines`, `optin_catalog`, `onsen_id_case`, extra smoke, `binary_size` ignore).
+
+Playwright UI batches (stock SVGO 4.1.0 vs the Rust `svg-race` / minSVG lane; no raven / no POV):
+
+| batch | files | SVGO wall | minSVG wall | freeze | notes |
+|---|---:|---:|---:|---:|---|
+| Wave 3 (arrow + plus + onsen) | **3/3** | 499.0 ms | 20.8 ms | **24.04×** | `url(#poolFill)` kept |
+| Latest 7-file UI (capybara, rust logo, heart, star, check, arrow, onsen) | **7/7** | 1199.4 ms | 40.1 ms | **29.89×** | Peak RSS 105.27 MB vs **3.19 MB**; onsen `url(#poolFill)` kept |
+
+There is no 55/55 scorecard. The correctness suite is **`cargo +1.83.0 test` = 368 passed** (landmines **9/9**, pixel-visual **9/9**, `parity_reallife` **4/4**, onsen dest-count **10** vs SVGO **20**, rust.svg dests **201/201**).

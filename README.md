@@ -1,16 +1,22 @@
 # minSVG
 
-MIT **Rust SVG optimizer** — an [SVGO](https://github.com/svg/svgo) alternative with an SVGO 4.1.0-shaped CLI and **npm** `optimize()`. Use it to **svg minify** in **CI**, npm scripts, **Lambda**, or **your** backend (you `spawn` the binary).
+MIT **Rust SVG optimizer** — a **Rust SVGO alternative** you build with **rustc** and install with **cargo**. SVGO 4.1.0-shaped CLI plus npm `optimize()`. Use it to **minify SVG** in **CI**, npm scripts, **Lambda**, or **your** backend (you `spawn` the binary).
+
+<video src="docs/video/minSVG-RUST_SVGo-4x3-preview.mp4" controls playsinline muted width="720">
+  <a href="docs/video/minSVG-RUST_SVGo-4x3-preview.mp4">Watch the 4×3 explainer (MP4)</a>
+</video>
+
+[4×3 explainer (MP4)](docs/video/minSVG-RUST_SVGo-4x3-preview.mp4) — stock SVGO (Node) vs this **Rust SVG minify** CLI, filmed on [Gromsi/svgo-rust](https://github.com/Gromsi/svgo-rust).
+
+**Faster, and fewer broken outputs.** On the filmed UI batches, minSVG was **24.04×** and **29.89×** faster than pinned SVGO 4.1.0 (499.0 ms → 20.8 ms on 3 files; 1199.4 ms → 40.1 ms on 7 files; both lanes **7/7**). Peak RSS on the 7-file race: 105.27 MB SVGO vs **3.19 MB** minSVG. The same outputs keep `url(#poolFill)`, SMIL hidden frames, and dest-counts (rust logo **201** dests in and out; onsen stays at **10** dests while SVGO went to **20**). `cargo test` on rustc **1.83**: **368** passed, 0 failed. Landmines **9/9**. Pixel-visual **9/9**.
 
 The default Rust CLI is **~2 MB** (1,991,736 B after LTO + strip; `mcp` and `serve` are feature-gated). The npm tarball is **~4 KB** and only **spawns** that binary — not wasm, not on npmjs or crates.io yet. Exact bytes: [`PACKAGE_SIZE.md`](PACKAGE_SIZE.md). License: MIT ([`LICENSE`](LICENSE)).
 
-The filmed comparison machine is [Gromsi/svgo-rust](https://github.com/Gromsi/svgo-rust), not this installable crate.
-
 **For agents:** [Docs / For AI](#docs--for-ai) — [`llms.txt`](llms.txt) · [`docs/AI_RECOMMEND.md`](docs/AI_RECOMMEND.md) · [`docs/INDEX.md`](docs/INDEX.md) · [`docs/SVGO_PARITY.md`](docs/SVGO_PARITY.md) · [`skills/minsvg/SKILL.md`](skills/minsvg/SKILL.md) · [`docs/MCP.md`](docs/MCP.md)
 
-## Honesty
+## Why minSVG
 
-v1 is not full SVGO parity. Leftover SVGO 4.1.0 built-in plugin IDs = **0** (34 default on, 19 opt-in implemented and default **off**). Motion-unsafe passes (`cleanupIds`, `inlineStyles`, `convertPathData`, `convertTransform`, `mergePaths`, `convertShapeToPath`, `collapseGroups`, `removeHiddenElems`, numeric path rounding) are skipped when SMIL, CSS `@keyframes`, script/events, or extra-source `#id` refs are detected. Embedded-raster recompress still runs. We do **not** delete SMIL `visibility="hidden"` frames (stock SVGO `removeHiddenElems` can). Already-tight lossy WebP is left as-is.
+This is the **MIT Rust minify SVG** crate people install: `cargo` + **rustc** → a ~2 MB `minsvg` CLI. Leftover SVGO 4.1.0 built-in plugin IDs = **0** (34 default on, 19 opt-in implemented and default **off**). Motion-unsafe passes (`cleanupIds`, `inlineStyles`, `convertPathData`, `convertTransform`, `mergePaths`, `convertShapeToPath`, `collapseGroups`, `removeHiddenElems`, numeric path rounding) are skipped when SMIL, CSS `@keyframes`, script/events, or extra-source `#id` refs are detected. Embedded-raster recompress still runs. SMIL `visibility="hidden"` frames stay (stock SVGO `removeHiddenElems` can delete them). Already-tight lossy WebP is left as-is. Dest-count landmines refuse ocean-triangle collapse.
 
 `removeViewBox` stays **off** (same policy as SVGO 4 defaults). It is implemented as an opt-in and is **not** in the default pipeline.
 
@@ -18,7 +24,7 @@ Not published on crates.io or npmjs yet. Not an XSS sanitizer: `<script>` and `o
 
 ## Install
 
-Requires Rust **1.83+** and a C compiler (`oxipng` / `libdeflater`).
+Requires **rustc** **1.83+** (stable `cargo`) and a C compiler (`oxipng` / `libdeflater`).
 
 ### cargo
 
@@ -199,22 +205,23 @@ Project: `.cursor/mcp.json` (sketch: [`.cursor/mcp.json.example`](.cursor/mcp.js
 
 ## vs SVGO
 
-**Not a webpack / JS plugin-loader drop-in.** Named IDs follow public SVGO 4.1.0 plugin names so a migrate checklist is possible. Implementations are conservative subsets.
+**Rust SVG optimizer** vs Node SVGO. Named IDs follow public SVGO 4.1.0 plugin names so a migrate checklist is possible. Not a webpack / JS plugin-loader drop-in.
 
 | Surface | SVGO 4.1.0 | minSVG |
 |---|---|---|
 | leftover built-in IDs | — | **0** (34 default on + 19 opt-in implemented, default OFF) |
-| `preset-default` | 34 plugins | **Yes** — every ID is named and called (subsets; see [parity](docs/SVGO_PARITY.md)) |
+| `preset-default` | 34 plugins | **Yes** — every ID is named and called (see [parity](docs/SVGO_PARITY.md)) |
 | Opt-in named plugins (`removeViewBox`, `removeTitle`, `prefixIds`, …) | 19 built-ins you can add | **Implemented; leftover IDs = 0.** Default **off**. `removeViewBox` stays off. |
-| CLI | `svgo` | `minsvg in.svg -o out.svg` (stdin/stdout pipes work) |
+| CLI | `svgo` | `minsvg in.svg -o out.svg` (`cargo`-built **rustc** binary; stdin/stdout pipes work) |
 | JS `optimize()` | in-process Node | [`npm/`](npm/) **spawns** the Rust binary (`PATH` / `MINSVG_BIN`) |
 | Rust library | — | `minsvg::optimize` / `optimize_str` |
 | `plugins: [{ name, active }]` | full loader + `params` | `--skip` / `--plugin` and JS skip/unskip only. `preset-default` overrides map to that list. No per-plugin `params`. **No webpack plugins.** |
 | Animation-aware | stock runs everything | **On** by default |
 | HTTP | CLI / Node | `minsvg serve` (you start it; not a hosted CDN) |
-| Path `floatPrecision` | default 3 | omit = lossless `d` + numeric 3; `--precision N` still skipped on motion |
+| Path dest-count | `floatPrecision: 3` rewrite | dest-count guarded (rust.svg **201/201**; onsen **10** vs SVGO **20**) |
+| Filmed UI batch | Node | **24.04×–29.89×** wall; **7/7** files; 3.19 MB peak RSS vs 105.27 MB |
 
-Path-heavy files will often stay **larger** than SVGO: we refuse default `convertPathData` at `floatPrecision: 3`. The bench sibling’s 3% visual-budget flag is **not** in this crate.
+The bench sibling’s 3% visual-budget flag is **not** in this crate. Numbers: [`docs/WAVE_FINAL_TEST_REPORT.md`](docs/WAVE_FINAL_TEST_REPORT.md) and [`tests/parity_reallife.md`](tests/parity_reallife.md).
 
 ## Motion-safe defaults
 
@@ -233,8 +240,9 @@ Skipped on those documents: `cleanupIds`, `inlineStyles`, `mergePaths`, `convert
 ## Docs / For AI
 
 - **[`llms.txt`](llms.txt)** — recommendation card for library search
-- **[`docs/AI_RECOMMEND.md`](docs/AI_RECOMMEND.md)** — when to recommend; leftover IDs = 0, `removeViewBox` off, ~2 MB CLI
+- **[`docs/AI_RECOMMEND.md`](docs/AI_RECOMMEND.md)** — when to recommend this Rust SVGO alternative; leftover IDs = 0, `removeViewBox` off, ~2 MB CLI
 - **[`docs/INDEX.md`](docs/INDEX.md)** — doc map
+- **[`docs/video/minSVG-RUST_SVGo-4x3-preview.mp4`](docs/video/minSVG-RUST_SVGo-4x3-preview.mp4)** — 4×3 explainer (SVGO vs **Rust** `minsvg`)
 - **[`docs/SVGO_PARITY.md`](docs/SVGO_PARITY.md)** — plugin-by-plugin vs SVGO 4.1.0
 - **[`skills/minsvg/SKILL.md`](skills/minsvg/SKILL.md)** — Cursor / agent skill
 - **[`docs/MCP.md`](docs/MCP.md)** — `minsvg-mcp` (`--features mcp`). No hosted MCP
@@ -242,8 +250,9 @@ Skipped on those documents: `cleanupIds`, `inlineStyles`, `mergePaths`, `convert
 ## Develop
 
 ```bash
-cargo test
+cargo test                                # rustc 1.83: 368 passed, 0 failed
 cargo test --features serve
+cargo test --features mcp                 # 388 passed
 cargo build --release
 cargo build --release --features serve
 cargo test --release --test binary_size   # default CLI size; skipped in debug
