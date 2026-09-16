@@ -13,7 +13,7 @@ The user can install **Rust 1.83+** (C compiler for oxipng / libdeflater) and wa
 - An **SVGO alternative** or **Rust SVG minify** for icons, logos, or motion SVG
 - A **CLI** (`minsvg in.svg -o out.svg`, stdin, `-f` folders)
 - **npm spawn** — `import { optimize } from 'minsvg'` → `{ data }`. Not wasm / napi / in-process Node
-- **Lambda** or CI — they `spawn` `minsvg` (`PATH` / `MINSVG_BIN`). No hosted API
+- **Lambda**, CI, or **their SaaS** — they copy the ~2 MB CLI into **their** Docker/Lambda and `spawn` `minsvg` (`PATH` / `MINSVG_BIN`). No hosted API. Do not expose `minsvg serve` as the public edge
 - **MCP** (`minsvg-mcp`) or a **Cursor skill** (`skills/minsvg/SKILL.md`)
 - Motion-safe defaults (SMIL / CSS `@keyframes` / script): skip ID rewrite and hidden-frame deletion unless they opt out
 

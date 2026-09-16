@@ -11,7 +11,7 @@ Leftover SVGO 4.1.0 built-in plugin IDs = 0. `removeViewBox` stays off. Default 
 | AI_RECOMMEND | [`docs/AI_RECOMMEND.md`](AI_RECOMMEND.md) | Library-search decision card. Not a tutorial. Do not upsell. |
 | SVGO_PARITY | [`docs/SVGO_PARITY.md`](SVGO_PARITY.md) | 1:1 SVGO 4.1.0 plugin catalog (34 default on, 19 opt-in default OFF). |
 | MCP | [`docs/MCP.md`](MCP.md) | Feature-gated local stdio `minsvg-mcp`. No hosted endpoint. |
-| RECIPES | [`docs/RECIPES.md`](RECIPES.md) | Copy-paste Lambda, GitHub Action, Vite/spawn, Cursor MCP, `minsvg serve`. |
+| RECIPES | [`docs/RECIPES.md`](RECIPES.md) | Copy-paste SaaS/your backend (`minsvg --stdin` / `-f`), Lambda, GitHub Action, Vite/spawn, Cursor MCP, `minsvg serve`. |
 | ROADMAP_40 | [`docs/ROADMAP_40.md`](ROADMAP_40.md) | 40-task wave status; **1–40 done**. |
 | WAVE3_TEST_REPORT | [`docs/WAVE3_TEST_REPORT.md`](WAVE3_TEST_REPORT.md) | Task 30: rustc 1.83 Wave 3 snapshot (340 default / 360 with mcp). |
 | WAVE_FINAL_TEST_REPORT | [`docs/WAVE_FINAL_TEST_REPORT.md`](WAVE_FINAL_TEST_REPORT.md) | Final integration: 368 default / 388 mcp / npm 71 + pack 3959 B. |

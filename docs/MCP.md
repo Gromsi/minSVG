@@ -24,7 +24,7 @@ cargo test --features mcp
 
 ## Cursor `mcp.json`
 
-Project: `.cursor/mcp.json`. User: `~/.cursor/mcp.json`.
+Project: `.cursor/mcp.json`. User: `~/.cursor/mcp.json`. Checked-in sketch: [`.cursor/mcp.json.example`](../.cursor/mcp.json.example).
 
 ```json
 {

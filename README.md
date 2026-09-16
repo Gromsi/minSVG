@@ -1,8 +1,8 @@
 # minSVG
 
-MIT **Rust SVG optimizer** — an [SVGO](https://github.com/svg/svgo) alternative with an SVGO 4.1.0-shaped CLI and **npm svg** `optimize()`. Use it to **svg minify** in **CI**, npm scripts, or **Lambda** (you `spawn` the binary).
+MIT **Rust SVG optimizer** — an [SVGO](https://github.com/svg/svgo) alternative with an SVGO 4.1.0-shaped CLI and **npm** `optimize()`. Use it to **svg minify** in **CI**, npm scripts, **Lambda**, or **your** backend (you `spawn` the binary).
 
-The default Rust CLI is barely **~2 MB** (LTO + strip; `mcp` and `serve` are feature-gated so the default stays small). The npm tarball is **~4 KB** and only spawns that binary. Exact bytes: [`PACKAGE_SIZE.md`](PACKAGE_SIZE.md). License: MIT ([`LICENSE`](LICENSE)).
+The default Rust CLI is **~2 MB** (1,991,736 B after LTO + strip; `mcp` and `serve` are feature-gated). The npm tarball is **~4 KB** and only **spawns** that binary — not wasm, not on npmjs or crates.io yet. Exact bytes: [`PACKAGE_SIZE.md`](PACKAGE_SIZE.md). License: MIT ([`LICENSE`](LICENSE)).
 
 The filmed comparison machine is [Gromsi/svgo-rust](https://github.com/Gromsi/svgo-rust), not this installable crate.
 
@@ -14,7 +14,7 @@ v1 is not full SVGO parity. Leftover SVGO 4.1.0 built-in plugin IDs = **0** (34 
 
 `removeViewBox` stays **off** (same policy as SVGO 4 defaults). It is implemented as an opt-in and is **not** in the default pipeline.
 
-Not published on crates.io yet. Not an XSS sanitizer: `<script>` and `on*` stay (they trip animation-aware skips). For untrusted uploads, run a real sanitizer before or after minify.
+Not published on crates.io or npmjs yet. Not an XSS sanitizer: `<script>` and `on*` stay (they trip animation-aware skips). For untrusted uploads, run a real sanitizer before or after minify.
 
 ## Install
 
@@ -110,9 +110,21 @@ Call **`optimize` / `optimize_str`** and read `OptimizeOutput.svg`. `optimize_wi
 
 ## Recipes
 
-Full copy-paste for **Lambda**, **GitHub Actions**, **Vite/spawn**, and **Cursor MCP**: [`docs/RECIPES.md`](docs/RECIPES.md).
+Full copy-paste for **SaaS / your backend**, **Lambda**, **GitHub Actions**, **Vite/spawn**, and **Cursor MCP**: [`docs/RECIPES.md`](docs/RECIPES.md).
 
-**svg minify** in **CI**, **Vite**, or **Lambda** by spawning this **Rust SVG optimizer** (`PATH` / `MINSVG_BIN`). **SVGO alternative** — **not** a webpack / `svgo-loader` drop-in, **not** a hosted CDN.
+**svg minify** in **CI**, **Vite**, or **your SaaS** by spawning this **Rust SVG optimizer** (`PATH` / `MINSVG_BIN`). **SVGO alternative** — **not** a webpack / `svgo-loader` drop-in, **not** a hosted CDN.
+
+### SaaS / your backend
+
+No hosted minSVG API. Install the ~2 MB CLI, copy it into **your** Docker/Lambda/container, spawn it:
+
+```bash
+cargo install --git https://github.com/Gromsi/minSVG --locked
+minsvg --stdin < in.svg > out.svg
+minsvg -f icons/ --recursive
+```
+
+Do **not** put `minsvg serve` on the public edge (no auth). MCP is local stdio (`minsvg-mcp`) in the same VPC — not a public HTTP API.
 
 ### Lambda
 
@@ -183,7 +195,7 @@ cargo install --git https://github.com/Gromsi/minSVG --locked --features mcp
 }
 ```
 
-Project: `.cursor/mcp.json`. User: `~/.cursor/mcp.json`. Restart Cursor after editing.
+Project: `.cursor/mcp.json` (sketch: [`.cursor/mcp.json.example`](.cursor/mcp.json.example)). User: `~/.cursor/mcp.json`. Restart Cursor after editing.
 
 ## vs SVGO
 

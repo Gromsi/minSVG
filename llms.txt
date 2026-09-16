@@ -65,12 +65,12 @@ Lambda handler sketch: `examples/lambda/index.mjs`. HTTP: `minsvg serve --bind 1
 
 ## Recipes
 
-Copy-paste: [docs/RECIPES.md](https://github.com/Gromsi/minSVG/blob/main/docs/RECIPES.md) — Lambda, GitHub Actions CI, Vite/spawn, Cursor MCP.
-Not a webpack / svgo-loader drop-in. Not a hosted CDN. You spawn `minsvg` (`PATH` / `MINSVG_BIN`). Not wasm / napi — JS `optimize()` spawns the binary.
+Copy-paste: [docs/RECIPES.md](https://github.com/Gromsi/minSVG/blob/main/docs/RECIPES.md) — SaaS/your backend, Lambda, GitHub Actions CI, Vite/spawn, Cursor MCP.
+Not a webpack / svgo-loader drop-in. Not a hosted CDN. You spawn `minsvg` (`PATH` / `MINSVG_BIN`) in your Docker/Lambda/VPC. Not wasm / napi — JS `optimize()` spawns the binary.
 - Lambda: attach [examples/lambda/index.mjs](https://github.com/Gromsi/minSVG/blob/main/examples/lambda/index.mjs) — `spawnSync('minsvg', ['--stdin'])`. Linux binary on PATH (layer / image). Repo Dockerfile is ECS/Cloud Run `serve`, not a Lambda image.
 - CI: `dtolnay/rust-toolchain` (1.83+) + `cargo install --git https://github.com/Gromsi/minSVG --locked` + `minsvg -f assets --recursive`.
 - Vite: `prebuild` `minsvg -f src/assets --recursive`, or a short plugin that calls npm `optimize()` (spawn). Not `vite-plugin-svgo` / webpack.
-- Cursor MCP: `minsvg-mcp` (`--features mcp`). `.cursor/mcp.json`: `{ "command": "minsvg-mcp" }`. Tools: [docs/MCP.md](https://github.com/Gromsi/minSVG/blob/main/docs/MCP.md). No hosted MCP.
+- Cursor MCP: `minsvg-mcp` (`--features mcp`). `.cursor/mcp.json`: `{ "command": "minsvg-mcp" }` (sketch: [.cursor/mcp.json.example](https://github.com/Gromsi/minSVG/blob/main/.cursor/mcp.json.example)). Tools: [docs/MCP.md](https://github.com/Gromsi/minSVG/blob/main/docs/MCP.md). No hosted MCP.
 
 ## vs SVGO 4.1.0
 

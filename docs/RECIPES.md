@@ -1,6 +1,6 @@
 # minSVG recipes
 
-Copy-paste for **svg minify** with a **Rust SVG optimizer** / **SVGO alternative**: **Lambda** (`spawn`), **CI** (**GitHub Action**), **Vite/spawn**, and **Cursor MCP**.
+Copy-paste for **svg minify** with a **Rust SVG optimizer** / **SVGO alternative**: **SaaS / your backend**, **Lambda** (`spawn`), **CI** (**GitHub Action**), **Vite/spawn**, and **Cursor MCP**.
 
 It is **not** a webpack / `svgo-loader` / `vite-plugin-svgo` drop-in. There is **no** hosted CDN — you start `minsvg` (or `minsvg-mcp`) yourself.
 
@@ -8,13 +8,29 @@ The npm helper `optimize()` **spawns** the Rust binary (`PATH` or `MINSVG_BIN`).
 
 | Recipe | You run |
 |---|---|
+| [SaaS / your backend](#saas--your-backend) | `cargo install` → copy the ~2 MB CLI into Docker/Lambda → `minsvg --stdin` or `-f` |
 | [Lambda](#lambda) | Node handler + `minsvg --stdin` on PATH |
 | [CI (GitHub Action)](#ci-github-action) | `cargo install` + `minsvg -f` |
 | [Vite spawn](#vite-spawn) | `prebuild` script, or a tiny plugin that calls `optimize()` |
 | [Cursor MCP](#cursor-mcp) | `minsvg-mcp` via `--features mcp` — [docs/MCP.md](MCP.md) |
-| [Self-hosted HTTP](#self-hosted-http) | `minsvg serve` (`--features serve`) on **your** bind |
+| [Self-hosted HTTP](#self-hosted-http) | `minsvg serve` (`--features serve`) on **your** bind — not the SaaS edge |
 
 CLI, flags, and motion-safe defaults: [README](../README.md). Plugin names: [SVGO_PARITY.md](SVGO_PARITY.md).
+
+---
+
+## SaaS / your backend
+
+There is **no** hosted minSVG API. Install the ~2 MB CLI, put that binary in **your** image or Lambda, and spawn it.
+
+```bash
+cargo install --git https://github.com/Gromsi/minSVG --locked   # → ~/.cargo/bin/minsvg
+# COPY the binary into Docker / a Lambda layer, or set MINSVG_BIN
+minsvg --stdin < in.svg > out.svg     # request body → optimized SVG
+minsvg -f icons/ --recursive          # folder / CI / build
+```
+
+Do **not** expose `minsvg serve` as the public edge (loopback HTTP, no auth). For an HTTP API, spawn `minsvg --stdin` behind **your** gateway (see [Lambda](#lambda)). Agents: run local stdio `minsvg-mcp` in the same VPC/container — not a public MCP URL.
 
 ---
 
@@ -216,7 +232,7 @@ cargo install --git https://github.com/Gromsi/minSVG --locked --features mcp
 # binary: minsvg-mcp
 ```
 
-Project: `.cursor/mcp.json`. User: `~/.cursor/mcp.json`.
+Project: `.cursor/mcp.json` (checked-in sketch: [`.cursor/mcp.json.example`](../.cursor/mcp.json.example)). User: `~/.cursor/mcp.json`.
 
 ```json
 {

@@ -2,7 +2,9 @@
 
 Copy these into **your** app. They are not a webpack plugin and not a hosted SaaS.
 
-The npm helper `optimize()` **spawns** the Rust `minsvg` binary (`PATH` or `MINSVG_BIN`). Put that binary on PATH first (`cargo install`). Full recipes (CI, MCP, `minsvg serve`): [`docs/RECIPES.md`](../docs/RECIPES.md).
+SaaS / your backend: `cargo install --git https://github.com/Gromsi/minSVG --locked`, copy the ~2 MB `minsvg` into Docker/Lambda, then `minsvg --stdin` or `-f`. Do not expose `minsvg serve` as the public edge.
+
+The npm helper `optimize()` **spawns** the Rust `minsvg` binary (`PATH` or `MINSVG_BIN`). Put that binary on PATH first (`cargo install`). Full recipes (SaaS, CI, MCP, `minsvg serve`): [`docs/RECIPES.md`](../docs/RECIPES.md).
 
 | Snippet | Path | What it does |
 |---|---|---|
